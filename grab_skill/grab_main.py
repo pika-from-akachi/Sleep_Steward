@@ -33,6 +33,7 @@ STEPFUN_API_KEY = "42bzP32Fu4tI7lQlQPUU22jdfYiPvr2qSVVP7Mzmmfa5yjLfD4rwFjgrW5ST2
 
 # 观测姿态 (相机俯视桌面, 能看到物体) — 用标定基准姿态
 OBSERVE_FILE = Path("/root/grab_skill/calibration/base_pose.json")
+MID_POSE_FILE = Path("/root/grab_skill/calibration/mid_pose.json")
 DEFAULT_OBSERVE = [1.51, -0.20, -2.757, 1.67, 2.757, 0.363, -0.773]
 
 GRIPPER_TOOL_LEN = 0.13   # 夹爪尖端在 flange 下方的垂直距离 (斜抓投影; 0.12偏低0.14偏高, 取0.13)
@@ -60,6 +61,14 @@ def load_observe_pose():
         return list(json.loads(OBSERVE_FILE.read_text())["joints"])
     print("[Observe] ⚠️ 无 base_pose.json, 用默认观测姿态")
     return list(DEFAULT_OBSERVE)
+
+
+def load_mid_pose(fallback):
+    """加载示教中间位置, 不存在则返回 fallback"""
+    if MID_POSE_FILE.exists():
+        return list(json.loads(MID_POSE_FILE.read_text())["joints"])
+    print("[MidPose] ⚠️ 无 mid_pose.json, 用回退姿态")
+    return list(fallback)
 
 
 def pixel_to_camera_3d(u, v, depth_m, K):
@@ -290,6 +299,7 @@ def main():
 
     detector = CloudDetector(STEPFUN_API_KEY)
     observe = load_observe_pose()
+    mid_pose = load_mid_pose(observe)  # 中间位置, 不存在则用观测姿态
     cam_mount = cam_mount_xyzrpy()
     print("=" * 60)
     print(f"🎯 {args.object} | 📷 {args.camera} | 深度={'on' if args.enable_depth else 'off'}")
@@ -508,14 +518,14 @@ def main():
             _ht = _th.Thread(target=_hold_gripper, daemon=True)
             _ht.start()
 
-            # 5. 关节运动回观测姿态 (夹持物体)
-            print(f"  → 关节运动回观测姿态 (夹持物体中)")
+            # 5. 去中间位置 (夹持物体)
+            print(f"  → 去中间位置 (夹持物体中)")
             for _att in range(3):
                 try:
-                    arm.move_joints(observe, speed_pct=15, timeout=60)
+                    arm.move_joints(mid_pose, speed_pct=20, timeout=60)
                     break
                 except Exception as e:
-                    print(f"  ⚠️ 回观测失败 (尝试 {_att+1}/3): {e}")
+                    print(f"  ⚠️ 去中间位置失败 (尝试 {_att+1}/3): {e}")
                     if _att < 2:
                         time.sleep(1)
 
@@ -550,17 +560,18 @@ def main():
                     print(f"  → 松爪 (投放)")
                     arm.gripper_open(GRIPPER_OPEN)
                     time.sleep(0.8)
-                print(f"  → 回观测")
+                # 松爪后回中间位置
+                print(f"  → 回中间位置")
                 for _att in range(3):
                     try:
-                        arm.move_joints(observe, speed_pct=15, timeout=60)
+                        arm.move_joints(mid_pose, speed_pct=20, timeout=60)
                         break
                     except Exception:
                         if _att < 2: time.sleep(1)
             else:
-                # 普通模式: 回观测后松爪
+                # 普通模式: 已在中间位置
                 if not args.yes:
-                    input(f"\n  👀 已回观测姿态, 物体夹持中. Enter=松爪: ")
+                    input(f"\n  👀 已到中间位置, 物体夹持中. Enter=松爪: ")
                 _holding = False
                 _ht.join(timeout=1)
                 print(f"  → 放开夹爪")
