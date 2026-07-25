@@ -1,7 +1,12 @@
 """
 Orbbec 相机接口 — 基于官方 OrbbecSDK_ROS2 v1.5.15
-- DaBai DC1: RGB 走 UVC (/dev/video0), 深度走 ROS2 topic
+- DaBai DC1: RGB 走 ROS2 topic, 深度走 ROS2 topic (depth_registration=true 对齐)
 - Gemini 335: RGB+深度均走 ROS2 topic
+
+深度对齐说明:
+  depth_registration:=true 使 DaBai DC1 将 640x400 深度 warp 到 640x480 彩色帧。
+  对齐后的深度发布在 /camera/depth/image_raw (与 color topic 同分辨率)。
+  本模块增加多帧时域滤波 (temporal median) 以降低结构光随机噪声 (~2-5mm RMS)。
 
 参考: https://github.com/orbbec/OrbbecSDK_ROS2
 """
@@ -14,33 +19,43 @@ import cv2
 
 # 官方支持的话题 (README_CN.MD §所有可用主题):
 #   /camera/color/image_raw    彩色流
-#   /camera/depth/image_raw    深度流
+#   /camera/depth/image_raw    深度流 (depth_registration=true 时已对齐到彩色)
 #   /camera/ir/image_raw       红外流
-#   /camera/depth/camera_info  深度内参
+#   /camera/depth/camera_info  深度内参 (depth_registration=true 时 = 彩色内参)
 #   /camera/color/camera_info  彩色内参
 
 CAMERA_CONFIGS = {
     "dabai_dc1": {
         # DaBai DC1: USB2 结构光相机, launch 文件名是 dabai.launch.py
         "launch_file": "dabai.launch.py",
-        "has_color_ros": True,           # 彩色走 ROS topic (本机无 /dev/video, UVC 不可用)
+        "has_color_ros": True,           # 彩色走 ROS topic
         "color_topic": "/camera/color/image_raw",
         "depth_topic": "/camera/depth/image_raw",
         "depth_info_topic": "/camera/depth/camera_info",
+        "color_info_topic": "/camera/color/camera_info",
     },
     "gemini_335": {
         "launch_file": "gemini_330_series.launch.py",
         "has_color_ros": True,           # RGB 走 ROS2
         "depth_topic": "/camera/aligned_depth_to_color/image_raw",
         "depth_info_topic": "/camera/aligned_depth_to_color/camera_info",
+        "color_info_topic": "/camera/color/camera_info",
     },
 }
 
 ORBBEC_WS = "/root/OrbbecSDK_ROS2"
 
+# 默认内参: 实测 DaBai DC1 depth_registration=true 时 /camera/depth/camera_info
+# fx=489.82 fy=489.82 cx=322.91 cy=210.87  (640x480 彩色光学系)
+DEFAULT_K_REGISTERED = np.array(
+    [[489.82, 0, 322.91],
+     [0, 489.82, 210.87],
+     [0, 0, 1]], dtype=np.float32
+)
+
 
 class StereoCamera:
-    """RGB+深度相机：RGB 用 OpenCV/V4L2 或 ROS2，深度用 ROS2"""
+    """RGB+深度相机：RGB 用 ROS2，深度用 ROS2 (depth_registration 对齐)"""
 
     def __init__(self, camera_model="dabai_dc1", camera_ns="camera",
                  enable_depth=False):
@@ -60,7 +75,7 @@ class StereoCamera:
         subprocess.run("killall -9 ros2 component_container 2>/dev/null", shell=True)
         time.sleep(0.5)
 
-        # RGB: UVC (DaBai) 或 ROS2 (Gemini)
+        # RGB: UVC (旧版 DaBai) 或 ROS2 (当前 DaBai/Gemini)
         if not self.cfg["has_color_ros"]:
             self._start_rgb_uvc()
         else:
@@ -71,7 +86,7 @@ class StereoCamera:
             self._start_depth_ros()
 
     def _start_rgb_uvc(self):
-        """DaBai 的 UVC RGB: OpenCV 直读"""
+        """DaBai 的 UVC RGB: OpenCV 直读 (旧方式, 不推荐)"""
         self._rgb_cap = cv2.VideoCapture(0)
         self._rgb_cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         self._rgb_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
@@ -86,7 +101,7 @@ class StereoCamera:
         print(f"[Camera] RGB: UVC /dev/video0 640x480 ✅")
 
     def _start_rgb_ros(self):
-        """Gemini 等: RGB 走 ROS2 topic，在 capture 时订阅"""
+        """RGB 走 ROS2 topic，在 capture 时订阅"""
         print("[Camera] RGB: 将通过 ROS2 topic 获取")
 
     def _start_depth_ros(self):
@@ -106,7 +121,8 @@ class StereoCamera:
             f"enable_point_cloud:=false "
             f"enable_color:={enable_color} "
             f"enable_depth:={enable_depth} "
-            f"enable_ldp:=false'"   # 关 LDP(激光保护): 近距场景它会关激光 → 深度全 0
+            f"enable_ldp:=false "   # 关 LDP(激光保护): 近距场景它会关激光 → 深度全 0
+            f"depth_registration:=true'"   # 深度注册到彩色 (DaBai用此参数对齐)
         )
         self._launch_proc = subprocess.Popen(
             cmd, shell=True, executable="/bin/bash",
@@ -114,12 +130,12 @@ class StereoCamera:
             start_new_session=True,
         )
         time.sleep(15)   # DC1 从启动到稳定出有效深度帧约需 14~16s, 留足预热
-        print(f"[Depth] ROS2 驱动已启动: {self.cfg['launch_file']}")
+        print(f"[Depth] ROS2 驱动已启动: {self.cfg['launch_file']} (depth_registration=true)")
 
-    # ─── 捕获 ────────────────────────────────────────────
+    # ─── 捕获 (单帧) ─────────────────────────────────────
 
     def capture(self, timeout=3.0):
-        """捕获一帧
+        """捕获一帧 RGB + 深度 (单帧, 不滤波)
 
         Returns:
             (rgb_bgr, depth_meters, K_3x3)
@@ -136,10 +152,112 @@ class StereoCamera:
             depth, K = self._capture_depth(timeout)
 
         if K is None:
-            # DaBai 默认内参 (640x400 IR 对齐到 640x480)
-            K = np.array([[479, 0, 322], [0, 479, 200], [0, 0, 1]], dtype=np.float32)
+            # 使用实测的注册后内参 (depth_registration=true, 640x480 彩色光学系)
+            print("[Camera] K 使用实测默认值 (depth_registration 640x480)")
+            K = DEFAULT_K_REGISTERED.copy()
 
         return rgb, depth, K
+
+    # ─── 捕获 (多帧时域滤波) ──────────────────────────────
+
+    def capture_filtered(self, num_frames=5, timeout=5.0):
+        """捕获 RGB + 多帧时域滤波深度 (减少结构光随机噪声)
+
+        采集 num_frames 帧深度, 逐像素取 median → 有效降低 2-5mm 的时域噪声。
+        RGB 取第一帧, 深度取多帧 median。
+
+        Args:
+            num_frames: 用于时域滤波的深度帧数 (3~7 推荐, 越大噪声越低但延迟越高)
+            timeout: 总超时时间 (秒)
+
+        Returns:
+            (rgb_bgr, depth_meters_filtered, K_3x3)
+        """
+        import rclpy
+        from sensor_msgs.msg import Image, CameraInfo
+        if not rclpy.ok():
+            rclpy.init(args=[])
+
+        # ── 同时订阅 color + depth + info ──
+        color_node = _QuickSub(self.cfg["color_topic"], msg_type="Image",
+                               timeout=timeout)
+        depth_node = _QuickSub(self.cfg["depth_topic"], msg_type="Image",
+                               timeout=timeout)
+        info_node = _QuickSub(self.cfg["depth_info_topic"], msg_type="CameraInfo",
+                              timeout=min(timeout, 4.0))
+
+        # 内参: 拿到一条即可
+        info_msg = info_node.get()
+        if info_msg is not None:
+            K = np.array(info_msg.k).reshape(3, 3)
+            print(f"[Depth] K from camera_info: fx={K[0,0]:.1f} fy={K[1,1]:.1f} "
+                  f"cx={K[0,2]:.1f} cy={K[1,2]:.1f}")
+        else:
+            print("[Depth] ⚠️ 未收到 camera_info, K 使用实测默认值")
+            K = DEFAULT_K_REGISTERED.copy()
+
+        # 收集多帧深度用于时域滤波
+        depth_frames = []
+        depth_meta = None
+        deadline = time.time() + timeout
+
+        print(f"[Depth] 收集 {num_frames} 帧用于时域滤波...")
+        while len(depth_frames) < num_frames and time.time() < deadline:
+            depth_node.spin_for(0.1)
+            msg = depth_node.latest
+            if msg is None:
+                continue
+            depth = _depth_msg_to_meters(msg)
+            if depth is None:
+                continue
+            valid_ratio = (depth > 0.0).sum() / depth.size
+            if valid_ratio < 0.05:
+                continue  # 跳过全 0 / 预热帧
+            depth_frames.append(depth)
+            if depth_meta is None:
+                depth_meta = (msg.width, msg.height, msg.encoding)
+            print(f"  [{len(depth_frames)}/{num_frames}] "
+                  f"{msg.width}x{msg.height} 有效={valid_ratio*100:.1f}%", end="")
+            if len(depth_frames) >= num_frames:
+                print()
+                break
+            print()
+
+        # ── 获取 RGB (取最新一帧, 与最后帧深度接近同步) ──
+        color_node.spin_for(0.3)
+        ros_img = color_node.latest
+        rgb = _ros_img_to_cv2(ros_img) if ros_img is not None else None
+
+        # 清理
+        color_node.destroy_node()
+        depth_node.destroy_node()
+        info_node.destroy_node()
+
+        # ── 时域 median 滤波 ──
+        if len(depth_frames) >= 2:
+            stack = np.stack(depth_frames, axis=0)      # (N, H, W)
+            depth_filtered = np.median(stack, axis=0).astype(np.float32)
+            # 保留原始的有效性: 超过半数帧有值的像素才保留
+            valid_mask = (stack > 0.0).sum(axis=0) > len(depth_frames) // 2
+            depth_filtered[~valid_mask] = 0.0
+            print(f"[Depth] 时域滤波完成: {len(depth_frames)} 帧 → per-pixel median")
+            print(f"        有效像素: {(depth_filtered > 0).sum()}/{depth_filtered.size}")
+        elif len(depth_frames) == 1:
+            depth_filtered = depth_frames[0]
+            print(f"[Depth] ⚠️ 只收集到 1 帧, 无法滤波 (尝试增加 timeout)")
+        else:
+            depth_filtered = None
+            print("[Depth] ❌ 未收集到有效深度帧!")
+
+        # 打印诊断
+        if depth_filtered is not None and (depth_filtered > 0).sum() > 0:
+            valid = depth_filtered[depth_filtered > 0]
+            print(f"[Depth] 范围={valid.min():.3f}~{valid.max():.3f}m "
+                  f"中位={np.median(valid):.3f}m")
+
+        return rgb, depth_filtered, K
+
+    # ─── 内部方法 ────────────────────────────────────────
 
     def _capture_rgb(self):
         """获取 RGB 帧"""
@@ -161,7 +279,7 @@ class StereoCamera:
                 return None
             return frame
 
-        # ROS2 模式: 从 topic 读 (Gemini)
+        # ROS2 模式: 从 topic 读
         import rclpy
         from sensor_msgs.msg import Image
         if not rclpy.ok():
@@ -176,10 +294,7 @@ class StereoCamera:
     def _capture_depth(self, timeout):
         """获取深度帧 + 内参
 
-        关键修复: 深度相机刚启动的前若干帧常为全 0 (传感器预热 / flush 帧)。
-        原实现只取第一条消息 → 几乎必然拿到全 0。
-        现改为持续自旋取最新帧, 跳过有效像素占比过低的预热帧, 在 timeout 内
-        拿到第一帧"真"数据; 同时打印诊断信息便于排查硬件/场景问题。
+        在 timeout 内持续自旋取最新帧, 跳过全 0 预热帧。
         """
         import rclpy
         from sensor_msgs.msg import Image, CameraInfo
@@ -187,9 +302,6 @@ class StereoCamera:
             rclpy.init(args=[])
 
         depth_node = _QuickSub(self.cfg["depth_topic"], msg_type="Image", timeout=timeout)
-        # ⚠️ 内参话题发的是 CameraInfo, 必须按 CameraInfo 订阅
-        # (原代码默认按 Image 订阅 → 类型不匹配 → 永远收不到 → K 退回硬编码默认值)
-        # camera_info 是 RELIABLE+VOLATILE 周期发布(30Hz, 非latched), 用默认 VOLATILE 订阅即可
         info_node = _QuickSub(self.cfg["depth_info_topic"], msg_type="CameraInfo",
                               timeout=min(timeout, 4.0))
 
@@ -224,9 +336,47 @@ class StereoCamera:
         if info_msg is not None:
             K = np.array(info_msg.k).reshape(3, 3)
         else:
-            print("[Depth] ⚠️ 未收到 camera_info, K 使用默认值")
+            print("[Depth] ⚠️ 未收到 camera_info, K 使用实测默认值")
 
         return depth, K
+
+    # ─── 诊断: 保存 RGB-D 叠加图 (检查对齐质量) ────────────
+
+    def save_alignment_check(self, rgb, depth, filepath="/tmp/depth_alignment.png"):
+        """将深度叠加到 RGB 上, 保存为彩色叠加图, 用于目视检查对齐质量。
+
+        红=近, 蓝=远, 黑色=无深度。在 RGB 物体边缘区域如果出现大量红色
+        (深度缺失) 说明对齐有问题。
+        """
+        if rgb is None or depth is None:
+            print("[AlignCheck] rgb/depth 不可用, 跳过")
+            return
+
+        h, w = rgb.shape[:2]
+        dh, dw = depth.shape[:2]
+
+        # 如果尺寸不一致, 缩放到一致
+        if (dh, dw) != (h, w):
+            depth_resized = cv2.resize(depth, (w, h), interpolation=cv2.INTER_NEAREST)
+        else:
+            depth_resized = depth
+
+        # 归一化深度到 0-255
+        valid = depth_resized > 0
+        d_norm = np.zeros_like(depth_resized)
+        if valid.sum() > 0:
+            d_min, d_max = depth_resized[valid].min(), depth_resized[valid].max()
+            if d_max > d_min:
+                d_norm[valid] = (depth_resized[valid] - d_min) / (d_max - d_min) * 255
+
+        # JET colormap on depth
+        depth_color = cv2.applyColorMap(d_norm.astype(np.uint8), cv2.COLORMAP_JET)
+        depth_color[~valid] = 0
+
+        # 50% 叠加
+        overlay = cv2.addWeighted(rgb, 0.5, depth_color, 0.5, 0)
+        cv2.imwrite(filepath, overlay)
+        print(f"[AlignCheck] RGB-D 叠加图保存到 {filepath}")
 
     # ─── 停止 ────────────────────────────────────────────
 
@@ -261,8 +411,6 @@ class _QuickSub:
         import rclpy
         from rclpy.node import Node
         from sensor_msgs.msg import Image, CameraInfo
-        # 传感器 Image/CameraInfo 一般用 BEST_EFFORT 发布;
-        # 订阅端用 BEST_EFFORT 是最宽松的 (能收 RELIABLE 也能收 BEST_EFFORT 发布者)
         try:
             from rclpy.qos import (QoSProfile, ReliabilityPolicy,
                                    HistoryPolicy, DurabilityPolicy)
@@ -270,7 +418,6 @@ class _QuickSub:
                 reliability=ReliabilityPolicy.BEST_EFFORT,
                 history=HistoryPolicy.KEEP_LAST,
                 depth=5,
-                # transient_local=True 用于收 latched 话题(如 camera_info, 只在启动时发一次)
                 durability=(DurabilityPolicy.TRANSIENT_LOCAL if transient_local
                             else DurabilityPolicy.VOLATILE),
             )

@@ -18,7 +18,7 @@ from sensor_msgs.msg import Image, CameraInfo
 from pyAgxArm import create_agx_arm_config, AgxArmFactory, ArmModel, NeroFW
 
 # ─── ArUco ──────────────────────────────────────────────────
-MARKER_ID, MARKER_SIZE = 0, 0.10
+MARKER_ID, MARKER_SIZE = 0, 0.15   # 黑方块边长(m) — 用25cm marker时改为0.25
 _DIC = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_5X5_50)
 _DET = cv2.aruco.ArucoDetector(_DIC, cv2.aruco.DetectorParameters())
 _OBJ = np.array([[0, 0, 0], [MARKER_SIZE, 0, 0],

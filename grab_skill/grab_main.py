@@ -18,7 +18,7 @@
     python3 grab_main.py --object "饮料瓶" --enable-depth
 """
 
-import argparse, time, sys, json, subprocess
+import argparse, re, time, sys, json, subprocess
 from contextlib import nullcontext
 from pathlib import Path
 import cv2, numpy as np
@@ -38,14 +38,14 @@ DEFAULT_OBSERVE = [1.51, -0.20, -2.757, 1.67, 2.757, 0.363, -0.773]
 GRIPPER_TOOL_LEN = 0.13   # 夹爪尖端在 flange 下方的垂直距离 (斜抓投影; 0.12偏低0.14偏高, 取0.13)
 GRASP_DESCEND = 0.10      # approach → grasp 下抓行程 (m, 夹爪尖端从物体上方下到物体)
 # 斜抓几何补偿 [dx, dy, dz] (实测微调得到, 下次自动对准, 不用手动微调)
-GRASP_OFFSET = [0.0, -0.03, -0.12]   # z: 固化 z-0.05 微调
+GRASP_OFFSET = [-0.06, -0.01, -0.06]
 GRASP_SPEED = 15
 GRIPPER_OPEN = 0.07
 # 抓取朝向 [roll,pitch,yaw] (基座系, +Y前+Z上)
 # ⚠️ 固件 IK 对 pitch 挑剔: 观测朝向 pitch=1.305 (接近 π/2 奇异边界) 被 REACH 拒绝;
 #    pitch=1.0 接受 (diag_approach2 验证全高度可达)。夹爪斜前下 ~57° 抓取。
 #    如夹不稳再微调 (试 pitch=0.9/1.1, 保持远离 ±π/2)
-GRASP_RPY = [1.094, 1.0, 1.402]
+GRASP_RPY = [1.094, 1.0, 1.402]   # 已验证能下降的朝向
 
 
 def activate_can():
@@ -77,6 +77,73 @@ def get_depth_median(depth_map, cx, cy, radius=15):
     return float(np.median(valid)) if len(valid) >= 5 else 0.0
 
 
+def get_depth_robust(depth_map, cx, cy, bbox_norm=None, inner_radius=8, outer_radius=25):
+    """物体区域鲁棒深度估计 (多区域 + 离群值剔除)
+
+    策略:
+      1) 先用小半径 (inner) 取物体中心的深度 → 大概率命中物体表面
+      2) 再用大半径 (outer) 取邻域深度 → 检测环境一致性
+      3) 如果内圈深度与外圈差 > 阈值 → 可能在边缘, 回退到更大范围搜索
+      4) 可选: 如果提供 bbox, 优先在 bbox 中心 30% 区域内搜索
+
+    Args:
+        depth_map: HxW float32 深度图 (米)
+        cx, cy: 物体中心像素
+        bbox_norm: 可选 [x1,y1,x2,y2] 归一化 bbox
+        inner_radius: 内圈半径 (像素)
+        outer_radius: 外圈半径 (像素)
+
+    Returns:
+        depth_meters: 物体深度 (米), 0.0 表示无效
+    """
+    h, w = depth_map.shape
+
+    # 如果提供了 bbox, 在 bbox 中心区域内采样 (避开边缘)
+    if bbox_norm is not None:
+        x1 = int(bbox_norm[0] * w)
+        y1 = int(bbox_norm[1] * h)
+        x2 = int(bbox_norm[2] * w)
+        y2 = int(bbox_norm[3] * h)
+        # 缩到中心 40% 区域 (避开 bbox 边缘)
+        margin_x = int((x2 - x1) * 0.3)
+        margin_y = int((y2 - y1) * 0.3)
+        bx1, bx2 = max(x1 + margin_x, 0), min(x2 - margin_x, w)
+        by1, by2 = max(y1 + margin_y, 0), min(y2 - margin_y, h)
+        if bx2 > bx1 and by2 > by1:
+            region = depth_map[by1:by2, bx1:bx2]
+            valid = region[(region > 0.05) & (region < 5.0)]
+            if len(valid) >= 10:
+                # 使用 10%-90% 截尾均值 (抗离群值)
+                lo, hi = np.percentile(valid, [10, 90])
+                trimmed = valid[(valid >= lo) & (valid <= hi)]
+                if len(trimmed) >= 5:
+                    return float(np.median(trimmed))
+
+    # 回退: 围绕中心点的同心圆采样
+    r1 = max(cy - inner_radius, 0)
+    r2 = min(cy + inner_radius + 1, h)
+    c1 = max(cx - inner_radius, 0)
+    c2 = min(cx + inner_radius + 1, w)
+    inner = depth_map[r1:r2, c1:c2]
+    inner_valid = inner[(inner > 0.05) & (inner < 5.0)]
+
+    if len(inner_valid) >= 5:
+        inner_med = float(np.median(inner_valid))
+        # 检查内圈深度一致性 (std 太大说明在边缘)
+        inner_std = float(np.std(inner_valid))
+        if inner_std < 0.05:  # < 5cm std → 可靠
+            return inner_med
+
+        # std 较大: 取截尾均值
+        lo, hi = np.percentile(inner_valid, [15, 85])
+        trimmed = inner_valid[(inner_valid >= lo) & (inner_valid <= hi)]
+        if len(trimmed) >= 3:
+            return float(np.median(trimmed))
+
+    # 最后回退: 标准中位数 (原逻辑)
+    return get_depth_median(depth_map, cx, cy, radius=outer_radius)
+
+
 def compute_grasp_pose(pos_base, rpy):
     """物体位置 + 朝向 → (预抓取, 抓取) flange 位姿 [x,y,z,r,p,y]。
     move_p 目标是 flange, 但夹爪从 flange 往下伸 TOOL_LEN →
@@ -89,6 +156,110 @@ def compute_grasp_pose(pos_base, rpy):
     return (approach + list(rpy), grasp + list(rpy))
 
 
+def interactive_fine_tune(arm, base_xy, above_z, rpy6, grasp_z0):
+    """交互式 XYZ 三方向微调 — 在物体上方用相对位移精确对准。
+
+    每次输入立即执行小幅 move_l 移动, 机械臂实时响应, 方便目视确认。
+
+    命令格式:
+      x+0.01    X方向+1cm  (基座系 +Y=前, +X=右)
+      x-0.005   X方向-0.5cm
+      y+0.01    Y方向+1cm
+      y-0.005   Y方向-0.5cm
+      z+0.01    抓取深度+1cm (夹爪更高 → 抓更浅)
+      z-0.01    抓取深度-1cm (夹爪更低 → 抓更深)
+      +0.01     等同于 z-0.01 (简写: 正数=下压更深, 常用)
+      Enter     确认当前位姿, 开始下降抓取
+      q / quit  放弃本次抓取
+
+    返回值: (xy_final, grasp_z_final) 或 (None, None) 表示放弃
+    """
+    offset_x, offset_y, offset_z = 0.0, 0.0, 0.0
+    grasp_z = grasp_z0
+
+    print("\n" + "─" * 50)
+    print("  🎮 XYZ 微调模式")
+    print("  命令: x±/y±/z± 单位米 | +0.01=下压1cm | Enter=确认 | q=放弃")
+    print("─" * 50)
+
+    while True:
+        # 显示当前状态
+        cur_x = base_xy[0] + offset_x
+        cur_y = base_xy[1] + offset_y
+        print(f"\n  📍 TCP: x={cur_x:.4f} y={cur_y:.4f} z={above_z:.4f} | "
+              f"偏移: dx={offset_x:+.4f} dy={offset_y:+.4f} | 抓取深度: {grasp_z:.4f}")
+
+        ans = input("  🎯 微调 > ").strip()
+
+        if ans == "":
+            print("  ✅ 确认, 开始下降抓取")
+            break
+        if ans.lower() in ("q", "quit", "exit"):
+            print("  ❌ 放弃抓取")
+            return None, None
+
+        # 解析: ±0.01 简写 → 视为 z- (正数=下压更深)
+        simple = re.match(r'^([+-]\d+\.?\d*)$', ans)
+        if simple:
+            delta = float(simple.group(1))
+            grasp_z += delta  # +0.01 → 下压1cm
+            print(f"  → 抓取深度调整: grasp_z={grasp_z:.4f} (偏移{delta:+.4f}m)")
+            continue
+
+        # 解析: 方向+偏移量 (如 x+0.01, y-0.005, z+0.02)
+        m = re.match(r'([xyz])\s*([+-]\d+\.?\d*)', ans.lower())
+        if not m:
+            print("  ⚠️ 无法识别, 可用: x+0.01 / y-0.005 / z+0.02 / +0.01 / Enter / q")
+            continue
+
+        axis, delta = m.group(1), float(m.group(2))
+
+        if axis == 'z':
+            # Z 偏移: 直接改抓取深度, 不动臂 (在 safety height 调 Z 无意义)
+            grasp_z += delta
+            print(f"  → 抓取深度: grasp_z={grasp_z:.4f} (偏移{delta:+.4f}m)")
+            continue
+
+        # X/Y 偏移: 更新偏移量, 并移动臂到新位置
+        idx = {'x': 0, 'y': 1}[axis]
+        if idx == 0:
+            offset_x += delta
+        else:
+            offset_y += delta
+
+        # 安全检查: 不超出工作空间
+        new_x = base_xy[0] + offset_x
+        new_y = base_xy[1] + offset_y
+        if abs(new_x) > 0.28:
+            print(f"  ⚠️ x={new_x:.3f} 超出安全范围 (±0.28m), 已回退")
+            if idx == 0:
+                offset_x -= delta
+            else:
+                offset_y -= delta
+            continue
+        if new_y < 0.22 or new_y > 0.52:
+            print(f"  ⚠️ y={new_y:.3f} 超出安全范围 (0.22~0.52m), 已回退")
+            if idx == 0:
+                offset_x -= delta
+            else:
+                offset_y -= delta
+            continue
+
+        # 执行小幅移动
+        target = [new_x, new_y, above_z, *rpy6]
+        try:
+            print(f"  → 移动到 x={new_x:.4f} y={new_y:.4f} z={above_z:.4f}")
+            arm.move_linear(target, speed_pct=8, timeout=8.0)
+        except Exception as e:
+            print(f"  ⚠️ 移动失败: {e}")
+            if idx == 0:
+                offset_x -= delta
+            else:
+                offset_y -= delta
+
+    return ([base_xy[0] + offset_x, base_xy[1] + offset_y], grasp_z)
+
+
 def main():
     parser = argparse.ArgumentParser(description="云端视觉抓取 (眼在手上)")
     parser.add_argument("--object", "-o", required=True)
@@ -97,21 +268,30 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="连臂+定位+规划, 不抓")
     parser.add_argument("--yes", action="store_true", help="跳过抓取前确认 (熟练后用)")
     parser.add_argument("--enable-depth", action="store_true", help="启用深度 (3D定位)")
+    parser.add_argument("--filter-frames", type=int, default=5,
+                        help="深度时域滤波帧数 (3-7, 越多噪声越低但延迟越大; 默认5)")
+    parser.add_argument("--grasp-rpy", type=str, default=None,
+                        help="抓取朝向 [roll,pitch,yaw] 基座系, 如 '0,0,0'=垂直下")
     args = parser.parse_args()
+    # 默认朝向已通过 parser default 设置
 
     detect_only = args.detect_only
     do_grasp = not args.dry_run and not detect_only
     # eye-in-hand: 相机装在臂上, 必须臂到观测姿态才有正确视野 → detect-only 也连臂
     need_arm = True
+    if need_arm:
+        activate_can()   # 任何需要臂的模式都要先激活 CAN (dry-run/detect-only/实抓)
 
     if do_grasp:
-        activate_can()
+        pass  # CAN 已在 need_arm 时激活
 
     detector = CloudDetector(STEPFUN_API_KEY)
     observe = load_observe_pose()
     cam_mount = cam_mount_xyzrpy()
     print("=" * 60)
     print(f"🎯 {args.object} | 📷 {args.camera} | 深度={'on' if args.enable_depth else 'off'}")
+    if args.enable_depth:
+        print(f"   时域滤波: {args.filter_frames} 帧 | 对齐模式: depth_registration")
     print(f"   观测姿态关节: {[round(j,2) for j in observe]}")
     print(f"   CAM_MOUNT(flange系) xyz={[round(v,4) for v in cam_mount[:3]]}")
     print("=" * 60)
@@ -131,22 +311,36 @@ def main():
         # ── [1] 捕获 RGB-D ──
         with StereoCamera(camera_model=args.camera, enable_depth=args.enable_depth) as cam:
             time.sleep(1.0)
-            print("\n[1] 捕获 RGB-D...")
-            rgb, depth, K = cam.capture(timeout=5.0)
+            if args.enable_depth:
+                print(f"\n[1] 捕获 RGB-D (时域滤波 {args.filter_frames} 帧)...")
+                rgb, depth, K = cam.capture_filtered(
+                    num_frames=args.filter_frames, timeout=8.0)
+            else:
+                print("\n[1] 捕获 RGB...")
+                rgb, depth, K = cam.capture(timeout=5.0)
             # ⚠️ 关键: 采图瞬间读 flange 位姿, 眼在手上相机随臂动
             if need_arm:
                 flange_at_capture = arm.get_flange_pose()
+            # 保存 RGB-D 叠加图用于诊断对齐质量
+            if depth is not None:
+                cam.save_alignment_check(rgb, depth, "/tmp/depth_alignment.png")
 
         if rgb is None:
             print("❌ RGB 采集失败"); sys.exit(1)
         h, w = rgb.shape[:2]
         print(f"  分辨率: {w}x{h}")
         if depth is not None:
-            print(f"  深度: {depth.min():.2f}~{depth.max():.2f}m")
+            valid = depth[depth > 0]
+            if len(valid) > 0:
+                print(f"  深度: {valid.min():.2f}~{valid.max():.2f}m "
+                      f"(中位={np.median(valid):.3f}m, 有效={(depth > 0).sum()}/{depth.size})")
+            else:
+                print("  深度: 全 0 (无有效深度)")
         else:
             print("  深度: 不可用")
         if K is not None:
-            print(f"  内参: fx={K[0,0]:.0f} fy={K[1,1]:.0f}")
+            print(f"  内参: fx={K[0,0]:.1f} fy={K[1,1]:.1f} "
+                  f"cx={K[0,2]:.1f} cy={K[1,2]:.1f}")
         if need_arm and flange_at_capture:
             print(f"  flange: pos={np.round(flange_at_capture[:3],3).tolist()} "
                   f"rpy={np.round(flange_at_capture[3:],3).tolist()}")
@@ -174,10 +368,12 @@ def main():
             print("❌ 无 flange 位姿, 无法做眼在手上变换"); sys.exit(1)
 
         # ── [3] 3D 定位: 像素+深度 → 相机系 → 基座系 (手眼变换) ──
-        print(f"\n[3] 3D 定位 (眼在手上)...")
-        depth_val = get_depth_median(depth, center_uv[0], center_uv[1])
+        print(f"\n[3] 3D 定位 (眼在手上, 时域滤波depth)...")
+        depth_val = get_depth_robust(depth, center_uv[0], center_uv[1],
+                                     bbox_norm=bbox)
         if depth_val <= 0:
             print("❌ 深度无效 (物体区域无有效深度 — 可能 RGB/depth 不对齐或超出深度范围)")
+            print("   提示: 检查 /tmp/depth_alignment.png 查看 RGB-D 叠加图")
             sys.exit(1)
 
         pos_cam = pixel_to_camera_3d(center_uv[0], center_uv[1], depth_val, K)
@@ -190,9 +386,20 @@ def main():
             print(f"     推荐 |x|<0.25, y∈[0.25,0.48] (臂正前方 25~48cm, 左右±25cm)")
             print(f"     超范围 approach 会原地不动, 请把物体放近/居中")
 
-        # 抓取朝向: 用固件 IK 接受的 GRASP_RPY (观测朝向 pitch=1.305 被拒, 用 pitch=1.0)
-        grasp_rpy = list(GRASP_RPY)
-        print(f"  抓取朝向 rpy={grasp_rpy} (固件 IK accept)")
+        # 抓取朝向: CLI可覆盖, 默认用观测姿态的flange朝向
+        if args.grasp_rpy:
+            grasp_rpy = [float(x) for x in args.grasp_rpy.split(",")]
+        else:
+            grasp_rpy = list(GRASP_RPY)
+        # 如果观测姿态的flange朝向可用, 优先用它 (自动避开π/2奇异)
+        if need_arm:
+            obs_fp = arm.get_flange_pose()
+            if obs_fp:
+                grasp_rpy = list(obs_fp[3:])
+                # pitch 离 π/2 太近 → IK 无解, 自动压 0.1
+                if abs(abs(grasp_rpy[1]) - 1.57) < 0.1:
+                    grasp_rpy[1] = 1.4 if grasp_rpy[1] > 0 else -1.4
+        print(f"  抓取朝向 rpy={[round(v,3) for v in grasp_rpy]}")
 
         # ── [4] 规划 ──
         approach_pose, grasp_pose = compute_grasp_pose(pos_base, grasp_rpy)
@@ -203,96 +410,98 @@ def main():
         if args.dry_run:
             print("\n✅ 模拟完成 (--dry-run, 未执行抓取)"); sys.exit(0)
 
-        # ── [5] 执行 ──
+        # ── [5] 执行抓取 ──
         print(f"\n[5] 执行抓取...")
+        import threading as _th
         try:
-            # 标准 approach: 先到物体正上方高位 → 在高空微调 xy 对准 → 纯竖直下降 → 夹
-            # 关键: xy 微调在高空(z=0.42)进行, 水平移动不会碰倒物体; 下降时 xy 已固定, 纯竖直
-            ABOVE_Z = 0.42   # 物体上方高位 (diag验证可达)
             rpy6 = approach_pose[3:]
-            cur_xy = [approach_pose[0], approach_pose[1]]   # 微调 xy (高空)
-            z_off = 0.0                                       # 微调夹取深度偏移
-            print(f"  → 先到物体上方 (z={ABOVE_Z})")
-            arm.move_to_pose([cur_xy[0], cur_xy[1], ABOVE_Z, *rpy6],
-                             speed_pct=GRASP_SPEED, safe_z_first=False)
-            if not args.yes:
-                print(f"\n  在高空微调 xy 对准物体 (水平移安全, 不会碰倒):")
-                while True:
-                    print(f"  上方 xy=[{cur_xy[0]:.3f},{cur_xy[1]:.3f}]  夹取深度偏移 z={z_off:+.3f}")
-                    ans = input("  Enter=竖直下降夹取 | 微调如 'x+0.02 y-0.01 z-0.04' | b=退回: ").strip().lower()
-                    if ans == "":
-                        break
-                    if ans == "b":
-                        print("  退回观测姿态"); arm.move_joints(observe, speed_pct=15); sys.exit(0)
-                    dx = dy = dz = 0.0
-                    for tok in ans.split():
-                        if len(tok) >= 2 and tok[0] in "xyz":
-                            try:
-                                d = float(tok[1:])
-                                if tok[0] == "x": dx = d
-                                elif tok[0] == "y": dy = d
-                                else: dz = d
-                            except ValueError:
-                                pass
-                    if dx == dy == dz == 0:
-                        print("  (无有效微调, 例: x+0.02)"); continue
-                    cur_xy[0] += dx; cur_xy[1] += dy; z_off += dz
-                    print(f"  ✓ 微调生效: xy=[{cur_xy[0]:.3f},{cur_xy[1]:.3f}]  z_off={z_off:+.3f} (影响下降深度)")
-                    try:
-                        arm.move_to_pose([cur_xy[0], cur_xy[1], ABOVE_Z, *rpy6],
-                                         speed_pct=8, safe_z_first=False)
-                    except Exception as e:
-                        print(f"  ⚠️ 微调失败 ({e}), 试更小步长")
-            # 纯竖直下降到夹取高度 (xy 已对准, 只降 z, 不碰物体)
-            final_z = approach_pose[2] + z_off
-            print(f"\n  → 竖直下降到夹取高度 (z={final_z:.3f}, 分步)")
-            z = ABOVE_Z
-            reached = ABOVE_Z
-            while z > final_z + 0.005:
-                z = max(final_z, z - 0.04)
-                try:
-                    arm.move_to_pose([cur_xy[0], cur_xy[1], z, *rpy6],
-                                     speed_pct=8, safe_z_first=False)
-                    reached = z
-                    time.sleep(0.3)
-                except Exception:
-                    print(f"  ⚠️ z={z:.3f} 不可达 (工作空间下限), 停在 z={reached:.3f}")
-                    if reached - final_z > 0.05:
-                        print(f"  ❌ 夹取高度差 {reached-final_z:.2f}m 够不到物体 — 物体太靠边/太远")
-                        print(f"     → 放居中 (|x|<0.15, y∈[0.30,0.45]), NERO 左/右边低 z 够不到")
-                        arm.move_joints(observe, speed_pct=15); sys.exit(1)
-                    print(f"  (差 {reached-final_z:.2f}m 较小, 继续尝试夹取)")
-                    break
-            # 夹取 (当前位置)
-            print(f"  🤏 夹取 (z={final_z:.3f})")
-            arm.gripper_close()
-            # 抬起 (z+12cm)
-            print(f"  → 抬起")
-            lift = [cur_xy[0], cur_xy[1], final_z + 0.12, *rpy6]
+            grasp_pose_full = list(grasp_pose)
+
+            # 1. 到物体上方 (XY到位, Z高10cm, 停住微调)
+            above_z = grasp_pose_full[2] + 0.10
+            xy_rpy = [grasp_pose_full[0], grasp_pose_full[1], above_z] + list(rpy6)
+            print(f"  → 到物体上方 (z={above_z:.3f})")
             try:
-                arm.move_to_pose(lift, speed_pct=GRASP_SPEED, safe_z_first=False)
+                arm.move_to_pose(xy_rpy, speed_pct=GRASP_SPEED,
+                                 safe_z_first=False, timeout=15.0)
+                fp = arm.get_flange_pose()
+                if fp: print(f"    到达 z={fp[2]:.3f}")
             except Exception as e:
-                print(f"  ⚠️ 抬起失败: {e}")
-            # 回观测位置, 直接松开夹爪
-            print(f"  → 回观测位置")
-            arm.move_joints(observe, speed_pct=15)
+                print(f"  ❌ 失败: {e}"); sys.exit(1)
+
+            # 2. 在物体上方交互微调 (臂在物体上方, 目视参照)
+            if not args.yes:
+                xy_final, new_grasp_z = interactive_fine_tune(
+                    arm, grasp_pose_full[:2], above_z, list(rpy6), grasp_pose_full[2])
+                if xy_final is None:
+                    print("放弃"); sys.exit(0)
+                grasp_pose_full[0], grasp_pose_full[1] = xy_final[0], xy_final[1]
+                grasp_pose_full[2] = new_grasp_z
+
+            # 3. Z下降 (move_p + 等臂停稳 + 验证Z确实降了)
+            print(f"  → Z下降 (到 z={grasp_pose_full[2]:.3f})")
+            try:
+                arm.move_to_pose(grasp_pose_full, speed_pct=10,
+                                 safe_z_first=False, timeout=15.0)
+            except Exception as e:
+                print(f"  ❌ 下降失败: {e}"); sys.exit(1)
+            time.sleep(0.5)  # 等臂停稳
+            fp = arm.get_flange_pose()
+            if fp:
+                print(f"    当前 z={fp[2]:.3f}")
+                if fp[2] > above_z - 0.01:
+                    # move_p静默失败, 用关节插值再试
+                    print("    ⚠️ move_p未降, 尝试关节方式...")
+                    jj = arm.get_joint_angles()
+                    if jj:
+                        for s in range(15):
+                            jj[1] += 0.03
+                            jj[1] = min(jj[1], 2.5)
+                            try:
+                                arm.move_joints(jj, speed_pct=8, timeout=4.0)
+                                fp2 = arm.get_flange_pose()
+                                if fp2 and fp2[2] < above_z - 0.01:
+                                    print(f"    ✅ 关节下降 z={fp2[2]:.3f}")
+                                    break
+                            except Exception:
+                                break
+
+            # 4. 夹爪闭合 + 持续 hold (防止运动中松开)
+            print(f"  🤏 夹取")
+            arm.gripper_close()
             time.sleep(0.5)
-            _fp = arm.get_flange_pose()
-            if _fp:
-                print(f"  ✋ 已回观测: flange=[{_fp[0]:.3f},{_fp[1]:.3f},{_fp[2]:.3f}]  (应为 ≈[-0.094,0.358,0.485])")
+            _holding = True
+            def _hold_gripper():
+                while _holding:
+                    try: arm._gripper.move_gripper_m(0.0)
+                    except: pass
+                    time.sleep(0.3)
+            _ht = _th.Thread(target=_hold_gripper, daemon=True)
+            _ht.start()
+
+            # 5. 关节运动回观测姿态 (夹持物体)
+            print(f"  → 关节运动回观测姿态 (夹持物体中)")
+            for _att in range(3):
+                try:
+                    arm.move_joints(observe, speed_pct=15, timeout=60)
+                    break
+                except Exception as e:
+                    print(f"  ⚠️ 回观测失败 (尝试 {_att+1}/3): {e}")
+                    if _att < 2:
+                        time.sleep(1)
+
+            # 6. 等待确认后松爪
+            if not args.yes:
+                input(f"\n  👀 已回观测姿态, 物体夹持中. Enter=松爪: ")
+            _holding = False
+            _ht.join(timeout=1)
             print(f"  → 放开夹爪")
             arm.gripper_open(GRIPPER_OPEN)
             time.sleep(0.8)
-            print("\n✅ 抓取完成, 回到观测姿态并松开")
+            print("\n✅ 完成: 到上方 → XYZ微调 → 下降 → 夹取 → 回观测 → 松爪")
+
         except Exception as e:
-            print(f"\n❌ approach 失败: {e}")
-            try:
-                print(f"  物体基座系 xy=({pos_base[0]:.3f},{pos_base[1]:.3f})  "
-                      f"approach=({approach_pose[0]:.3f},{approach_pose[1]:.3f},z={approach_pose[2]:.3f})")
-            except Exception:
-                pass
-            print("  若 REACH_TARGET_POS_FAILED/超时: 物体可能在 NERO 工作空间边缘")
-            print("    (太左/太右/太远/太近) → 试放到臂正前方居中 (左右±15cm, 前方 30~50cm)")
+            print(f"\n❌ 失败: {e}")
             import traceback; traceback.print_exc()
             sys.exit(1)
 

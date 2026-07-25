@@ -173,9 +173,9 @@ class CloudDetector:
                     except: pass
             except json.JSONDecodeError: pass
 
-        # 格式3: 自然语言 "x1: 约 670" → 去掉中文再匹配
-        clean = re.sub(r'[约左右大约大概]', '', text)
-        coords = re.findall(r'(?:x1|x2|y1|y2)\s*[=:：]\s*(\d+)', clean)
+        # 格式3: 自然语言 "x1: 约 670" → 去掉中文再匹配 (带分隔符)
+        clean = re.sub(r'[约左右大约大概在]', ' ', text)
+        coords = re.findall(r'(?:x1|x2|y1|y2)\s*[=:：\s]*\s*(\d+)', clean)
         if len(coords) >= 4:
             x1, y1, x2, y2 = int(coords[0]), int(coords[1]), int(coords[2]), int(coords[3])
             bbox = [x1/1000.0, y1/1000.0, x2/1000.0, y2/1000.0]
@@ -183,8 +183,26 @@ class CloudDetector:
             print(f"[Detector] 从NL提取: bbox={[round(v,3) for v in bbox]}")
             return bbox, center_uv, "object"
 
+        # 格式3b: 模型输出中文自然语言但坐标分散在不同句子中
+        # 如 "x1在670左右，y1在380左右，x2在840左右，y2在560左右"
+        # 先清理所有中文修饰词，再找 x1/x2/y1/y2 标签后的首个数字
+        clean2 = re.sub(r'[约左右大约大概在是，,。.\s]+', ' ', text)
+        coords2 = re.findall(r'[xy](\d)\s*[^\d]*?(\d{2,4})', clean2)
+        if len(coords2) >= 4:
+            nums = {}
+            for suffix, val in coords2:
+                key = f"{'x' if suffix in '12' else 'y'}{suffix}"
+                if key not in nums:
+                    nums[key] = int(val)
+            if all(k in nums for k in ['x1','y1','x2','y2']):
+                bbox = [nums['x1']/1000.0, nums['y1']/1000.0,
+                        nums['x2']/1000.0, nums['y2']/1000.0]
+                center_uv = (int((bbox[0]+bbox[2])/2*img_w), int((bbox[1]+bbox[3])/2*img_h))
+                print(f"[Detector] NL格式3b: bbox={[round(v,3) for v in bbox]}")
+                return bbox, center_uv, "object"
+
         # 格式4: 小数坐标 "x=0.67 到 x=0.94"
-        x_nums = re.findall(r'x\s*[=:：]\s*(\d*\.?\d+)', text)
+        x_nums = re.findall(r'x\s*[=:：\s]*(\d*\.?\d+)', text)
         y_nums = re.findall(r'y\s*[=:：]\s*(\d*\.?\d+)', text)
         if len(x_nums) >= 2 and len(y_nums) >= 2:
             bbox = [float(x_nums[0]), float(y_nums[0]), float(x_nums[1]), float(y_nums[1])]
@@ -196,6 +214,19 @@ class CloudDetector:
             center_uv = (int((bbox[0]+bbox[2])/2*img_w), int((bbox[1]+bbox[3])/2*img_h))
             print(f"[Detector] 小数坐标: {[round(v,3) for v in bbox]}")
             return bbox, center_uv, "object"
+
+        # 格式6: 兜底 — 在文本中找 4 个连续的在合法像素范围的数字
+        all_nums = re.findall(r'\b(\d{2,4})\b', text)
+        valid = [int(n) for n in all_nums if 200 <= int(n) <= 950]
+        if len(valid) >= 4:
+            # 找最接近的顺序组合
+            for i in range(len(valid) - 3):
+                x1, y1, x2, y2 = valid[i], valid[i+1], valid[i+2], valid[i+3]
+                if x1 < x2 and y1 < y2:  # 合理的 bbox
+                    bbox = [x1/1000.0, y1/1000.0, x2/1000.0, y2/1000.0]
+                    center_uv = (int((bbox[0]+bbox[2])/2*img_w), int((bbox[1]+bbox[3])/2*img_h))
+                    print(f"[Detector] 兜底提取: bbox={[round(v,3) for v in bbox]}")
+                    return bbox, center_uv, "object"
 
         print(f"[Detector] 解析失败: {text[:200]}")
         return None

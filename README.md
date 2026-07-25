@@ -15,20 +15,21 @@
 
 ## 📖 项目简介 | Introduction
 
-**中文**：本项目实现了基于 RDK X5 的 NERO 7-DOF 机械臂眼在手上手眼标定、云端 VLM 视觉抓取，以及 Tracer 1.0 移动底盘的 CAN 总线控制。包含全自动标定工具链、端到端抓取流程和底盘键盘遥控。
+**中文**：基于 RDK X5 的 NERO 7-DOF 机械臂**眼在手上**全关节手眼标定、时域滤波深度对齐、云端 VLM 视觉检测、交互式 XYZ 微调抓取，以及 Tracer 1.0 移动底盘 CAN 总线控制。
 
-**English**: This project implements eye-in-hand calibration, cloud-based VLM visual grasping for the NERO 7-DOF robotic arm, and CAN bus control for the Tracer 1.0 mobile base on the RDK X5 platform. Includes a fully automated calibration toolchain, end-to-end grasping pipeline, and chassis keyboard teleoperation.
+**English**: Eye-in-hand full-joint hand-eye calibration, temporally filtered depth alignment, cloud-based VLM visual detection, interactive XYZ fine-tuned grasping for the NERO 7-DOF arm, and CAN bus control for the Tracer 1.0 mobile base — all on the RDK X5 platform.
 
 ---
 
 ## ✨ 功能特性 | Features
 
-| 模块 | 功能 | Module | Feature |
-|---|---|---|---|
-| 🎯 手眼标定 | 全自动采集+Tsai+非线性优化 | 🎯 Hand-Eye Calibration | Auto-collect + Tsai + Nonlinear optimization |
-| 🤖 视觉抓取 | VLM检测→深度定位→手眼变换→笛卡尔抓取 | 🤖 Visual Grasping | VLM detect → depth localize → hand-eye transform → Cartesian grasp |
-| 🚗 底盘控制 | Tracer CAN 协议直控+键盘遥控 | 🚗 Base Control | Tracer CAN protocol + keyboard teleop |
-| 📊 独立验证 | 随机姿态重投影误差评估 | 📊 Validation | Random-pose reprojection evaluation |
+| 模块 | 功能 |
+|---|---|
+| 🎯 手眼标定 | 40 姿态全关节覆盖 (J1~J7)、Tsai 初值 + 多初值非线性优化、自动更新 transforms.py |
+| 📸 深度对齐 | 5 帧 per-pixel median 时域滤波、`depth_registration:=true` RGB-D 对齐、对齐质量叠加图 |
+| 🤖 视觉抓取 | VLM 检测 → 鲁棒深度采样 → 眼在手上变换 → 两段式到位 (XY上方+Z下降) → 交互 XYZ 微调 |
+| 🚗 底盘控制 | Tracer CAN 协议直控 + 键盘遥控 (WASD) |
+| 🔍 VLM 检测 | StepFun step-3.7-flash 云端多模态，支持中文自然语言坐标解析 |
 
 ---
 
@@ -39,136 +40,149 @@
 | **平台** | RDK X5 (Horizon Robotics, ARM Ubuntu 22.04) |
 | **中间件** | ROS 2 Humble |
 | **语言** | Python 3.10+ |
-| **机械臂 SDK** | pyAgxArm (AgileX NERO, socketcan) |
-| **相机驱动** | OrbbecSDK ROS 2 (DaBai DC1) |
-| **CAN 通信** | python-can + socketcan + gs_usb (candleLight) |
-| **计算机视觉** | OpenCV 5.x (ArUco 检测, PnP) |
-| **数值优化** | SciPy (least_squares, Tsai-Lenz hand-eye) |
-| **AI 检测** | StepFun step-3.7-flash (云端 VLM 多模态检测) |
+| **机械臂 SDK** | pyAgxArm (AgileX NERO, socketcan, CAN1@1Mbps) |
+| **相机驱动** | OrbbecSDK ROS 2 v1.5.15 (DaBai DC1) |
+| **数值优化** | SciPy (least_squares), Tsai-Lenz hand-eye |
+| **计算机视觉** | OpenCV (ArUco DICT_4X4_50, PnP) |
+| **AI 检测** | StepFun step-3.7-flash (云端 VLM) |
 
 ---
 
-## 🔧 硬件清单 | Hardware
+## 🔧 硬件 | Hardware
 
 | 设备 | 接口 | 说明 |
 |---|---|---|
-| **RDK X5** | — | 主控板，Ubuntu 22.04 + ROS2 Humble |
-| **NERO 机械臂** | CAN1 @1Mbps | 松灵 7-DOF，pyAgxArm 直连（不使用 MoveIt） |
-| **Orbbec DaBai DC1** | USB 2.0 | 眼在手上 RGB-D 相机，装在 flange/link7 |
-| **Tracer 1.0** | CAN @500kbps | 松灵差速移动底盘，candleLight USB-CAN |
-| **ArUco 标定板** | — | DICT_5X5_50 ID0，边长 15cm |
+| **RDK X5** | — | 主控板 |
+| **NERO 机械臂** | CAN1 @1Mbps | 7-DOF, pyAgxArm 直连 |
+| **Orbbec DaBai DC1** | USB 2.0 | 眼在手上 RGB-D |
+| **Tracer 1.0** | CAN @500kbps | 松灵差速底盘, candleLight USB-CAN |
+| **ArUco 标定板** | — | DICT_4X4_50 ID=0, 10cm |
 
 ---
 
 ## 📁 目录结构 | Project Structure
 
 ```
-Sleep_Steward/
-├── grab_skill/              # 手眼标定 + 视觉抓取 (主工程)
-│   ├── calib_auto.py        # 全自动标定 (Tsai + 非线性优化)
-│   ├── verify_auto.py       # 独立随机姿态验证
-│   ├── grab_main.py         # 视觉抓取主入口
-│   ├── transforms.py        # 眼在手上坐标变换 (CAM_MOUNT)
-│   ├── arm_control.py       # NERO 臂安全控制
-│   ├── camera.py            # Orbbec 相机接口
-│   ├── detector.py          # VLM 物体检测
-│   ├── set_base.py          # 观测基准姿态设置
-│   ├── generate_marker.py   # ArUco 标记生成
-│   └── parse_calib_result.py# 标定结果解析
-├── tracer_test.py           # Tracer 底盘运动测试
-├── tracer_keyboard.py       # 底盘键盘遥控 (WASD)
-├── README.md
-└── LICENSE
+grab_skill/
+├── calib_full.py            # 全关节手眼标定 (40姿态, 自动更新transforms.py)
+├── calib_auto.py            # 自动标定 (18姿态)
+├── verify_auto.py           # 独立随机姿态验证
+├── set_base.py              # 观测基准姿态交互设置
+├── grab_main.py             # 视觉抓取主入口
+├── transforms.py            # 眼在手上坐标变换 (CAM_MOUNT)
+├── arm_control.py           # NERO 臂安全控制器
+├── camera.py                # Orbbec 相机接口 (时域滤波 + 深度对齐)
+├── detector.py              # VLM 物体检测 (中文NL解析)
+├── generate_marker.py       # ArUco 标记生成
+├── parse_calib_result.py    # 标定结果解析
+└── calibration/             # 标定数据 + 基座姿态
+tracer_test.py               # 底盘运动测试
+tracer_keyboard.py           # 底盘键盘遥控
 ```
 
 ---
 
 ## 🚀 快速开始 | Quick Start
 
-### 环境准备 | Prerequisites
+### 环境准备
 
 ```bash
 # RDK X5 上
 source /opt/ros/humble/setup.bash
 source /root/OrbbecSDK_ROS2/install/setup.bash
-
-pip3 install python-can opencv-contrib-python scipy numpy
 ```
 
-### 1. 手眼标定 | Hand-Eye Calibration
+### 1. 启动相机 (终端1, 保持运行)
+
+```bash
+ros2 launch orbbec_camera dabai.launch.py \
+    camera_name:=camera enable_color:=true enable_depth:=true \
+    enable_point_cloud:=false enable_ir:=false enable_ldp:=false \
+    depth_registration:=true
+```
+
+### 2. 手眼标定
 
 ```bash
 cd grab_skill
-python3 set_base.py            # 设置观测基准姿态
-python3 calib_auto.py          # 全自动标定 (18姿态 + 非线性优化)
-python3 verify_auto.py         # 独立验证 (σ < 1.5cm)
-python3 parse_calib_result.py  # 写入 transforms.py
+python3 set_base.py            # 设定观测姿态 (标记可见, J5远离限位)
+python3 calib_full.py          # 全关节标定 (40姿态, 自动更新transforms.py)
 ```
 
-### 2. 视觉抓取 | Visual Grasping
+### 3. 视觉抓取
 
 ```bash
 cd grab_skill
-# 相机节点需在另一终端运行
-python3 grab_main.py --object "带白条的黑色盒子" --enable-depth
+python3 grab_main.py --object "士力架巧克力" --enable-depth
+
+# 选项:
+#   --object "目标物体"    检测目标 (中文)
+#   --enable-depth         启用深度3D定位
+#   --filter-frames 5      时域滤波帧数 (默认5)
+#   --grasp-rpy "r,p,y"    手动指定抓取朝向
+#   --dry-run              仅规划不执行
+#   --yes                  跳过确认
 ```
 
-### 3. 底盘控制 | Tracer Base Control
+### 抓取流程
+
+1. 臂去观测姿态 → 采图 → VLM 检测
+2. 深度定位 → 手眼变换 → 规划抓取位姿
+3. **XY 到位**：臂到物体上方 (z+10cm)
+4. **交互微调**：`x+0.01` / `y-0.005` / `z+0.02` 实时移动
+5. **Z 下降**：确认后降到夹取高度
+6. **夹取** → 关节回观测 → Enter 松爪
+
+### 4. 底盘控制
 
 ```bash
-# 底盘运动测试
 python3 tracer_test.py 0.05 0 4    # 前进 20cm
-
-# 键盘遥控 (WASD / 方向键)
-python3 tracer_keyboard.py
+python3 tracer_keyboard.py          # 键盘遥控
 ```
 
 ---
 
-## 📐 关键技术细节 | Technical Details
+## 📐 关键技术 | Technical Details
 
-### 坐标变换链 | Coordinate Transform Chain
+### 坐标变换 (眼在手上)
 
 ```
 p_base = T_base_flange · T_flange_cam · p_cam
 ```
 
-- `p_cam`: 物体在相机光学系的坐标（深度+内参）
-- `T_flange_cam`: 手眼标定结果（transforms.py 的 `CAM_MOUNT`）
-- `T_base_flange`: 实时读取 `arm.get_flange_pose()`
+- `p_cam`: 深度 + 内参 → 相机光学系
+- `T_flange_cam`: 40 姿态标定 (transforms.py CAM_MOUNT)
+- `T_base_flange`: `arm.get_flange_pose()` 实时读取
 
-### NERO 固件 IK 约束 | Firmware IK Constraints
+### NERO IK 约束
 
-- 固件对 pitch 接近 ±π/2 的位姿返回 `REACH_TARGET_POS_FAILED`
-- 抓取朝向 `GRASP_RPY=[1.094, 1.0, 1.402]`（pitch=1.0，斜 ~57°）
-- `move_p` 大位移后关节解常远离当前 → `move_joints` 自动分步插值
+- pitch 接近 **±π/2 (≈1.57 rad)** 时 IK 奇异，代码自动将 pitch 压至 1.4
+- 抓取朝向默认跟随观测姿态 flange rpy
+- 下降优先 `move_p`，失败自动关节插值 (J2)
 
-### Tracer CAN 协议 | CAN Protocol
+### 深度对齐
 
-| 帧 ID | 方向 | 说明 |
-|---|---|---|
-| `0x111` | host→base | 运动控制 (线速度 mm/s, 角速度 0.001rad/s, **大端**) |
-| `0x421` | host→base | 切换 CAN 指令模式 `[0x01]` |
-| `0x441` | host→base | 清除急停/错误 `[0x00]` |
-| `0x211` | base→host | 系统状态 (20ms 周期) |
-| `0x221` | base→host | 运动反馈 (20ms) |
-| `0x311` | base→host | 里程计 (500ms) |
+- `depth_registration:=true` 将 640×400 深度 warp 到 640×480 彩色
+- `capture_filtered()` 采集 N 帧逐像素 median 滤波 (~50% 噪声降低)
+- `/tmp/depth_alignment.png` RGB-D 叠加图用于诊断对齐质量
 
-> ⚠️ 报文格式为 **MOTOROLA 大端**；控制周期 ≤500ms 否则超时停。
+### VLM 检测
 
----
-
-## ⚠️ 已知限制 | Known Limitations
-
-- NERO 固件 IK 挑剔朝向（pitch 接近 ±π/2 被拒）
-- DaBai DC1 RGB(640×480) 与深度(640×400)不对齐 → z 方向噪声 ±8cm
-- VLM 对黑色物体易误检（夹爪/地面），需加白条标记区分
-- Tracer 遥控器 SWB 位置影响 CAN 通信（实测最底位，因固件版本而异）
+- StepFun step-3.7-flash 多模态模型
+- 支持中文自然语言坐标解析 (格式 3b + 兜底格式 6)
+- 自动过滤过大 bbox (疑似背景误检)
 
 ---
 
-## 📄 开源协议 | License
+## ⚠️ 已知限制
 
-本项目采用 [MIT License](LICENSE) 开源协议。
+- NERO 固件 IK pitch 接近 ±π/2 时被拒 (自动压至 1.4)
+- DaBai DC1 视野窄 (~60°)，标定需 10cm 以上 ArUco 标记
+- VLM 对黑色/低对比度物体可能误检
+- Tracer 遥控器 SWB 影响 CAN 通信
 
-This project is licensed under the [MIT License](LICENSE).
+---
+
+## 📄 License
+
+MIT License. See [LICENSE](LICENSE).
