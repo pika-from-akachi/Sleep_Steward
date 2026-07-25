@@ -38,7 +38,8 @@ DEFAULT_OBSERVE = [1.51, -0.20, -2.757, 1.67, 2.757, 0.363, -0.773]
 GRIPPER_TOOL_LEN = 0.13   # 夹爪尖端在 flange 下方的垂直距离 (斜抓投影; 0.12偏低0.14偏高, 取0.13)
 GRASP_DESCEND = 0.10      # approach → grasp 下抓行程 (m, 夹爪尖端从物体上方下到物体)
 # 斜抓几何补偿 [dx, dy, dz] (实测微调得到, 下次自动对准, 不用手动微调)
-GRASP_OFFSET = [-0.06, -0.01, -0.06]
+GRASP_OFFSET = [-0.06, 0.01, -0.06]
+PLACE_OFFSET = [-0.05, -0.03, 0.0]   # 放置点偏置
 GRASP_SPEED = 15
 GRIPPER_OPEN = 0.07
 # 抓取朝向 [roll,pitch,yaw] (基座系, +Y前+Z上)
@@ -268,6 +269,8 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="连臂+定位+规划, 不抓")
     parser.add_argument("--yes", action="store_true", help="跳过抓取前确认 (熟练后用)")
     parser.add_argument("--enable-depth", action="store_true", help="启用深度 (3D定位)")
+    parser.add_argument("--place", "-p", type=str, default=None,
+                        help="放置目标描述 (如 '黄色胶带'), 启用抓取+放置模式")
     parser.add_argument("--filter-frames", type=int, default=5,
                         help="深度时域滤波帧数 (3-7, 越多噪声越低但延迟越大; 默认5)")
     parser.add_argument("--grasp-rpy", type=str, default=None,
@@ -360,6 +363,32 @@ def main():
         cv2.imwrite("/tmp/grab_detection.jpg", vis)
         print(f"  ✅ {label} | bbox={[round(v,3) for v in bbox]} | center={center_uv}")
 
+        # ── [2b] 放置目标检测 (可选) ──
+        place_pos_base = None
+        if args.place:
+            print(f"\n[2b] 云端 VLM: 放置点 '{args.place}'...")
+            p_bbox, p_center, p_label = detector.detect(rgb, args.place)
+            if p_bbox is None:
+                print(f"  ⚠️ 未找到 '{args.place}', 只抓取不放置")
+            else:
+                cv2.rectangle(vis, (int(p_bbox[0]*w), int(p_bbox[1]*h)),
+                              (int(p_bbox[2]*w), int(p_bbox[3]*h)), (255,0,0), 2)
+                cv2.circle(vis, p_center, 5, (255,0,0), -1)
+                cv2.putText(vis, p_label, (int(p_bbox[0]*w), max(int(p_bbox[1]*h)-10,20)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,0,0), 2)
+                print(f"  ✅ 放置点: {p_label} | center={p_center}")
+                p_depth = get_depth_robust(depth, p_center[0], p_center[1], bbox_norm=p_bbox)
+                if p_depth > 0:
+                    p_cam = pixel_to_camera_3d(p_center[0], p_center[1], p_depth, K)
+                    place_pos_base = eye_in_hand_to_base(p_cam, flange_at_capture, cam_mount)
+                    place_pos_base[0] += PLACE_OFFSET[0]
+                    place_pos_base[1] += PLACE_OFFSET[1]
+                    place_pos_base[2] += PLACE_OFFSET[2]
+                    print(f"  放置点基座系: {[round(v,3) for v in place_pos_base]}")
+                else:
+                    print("  ⚠️ 放置点深度无效, 只抓取不放置")
+            cv2.imwrite("/tmp/grab_detection.jpg", vis)
+
         if detect_only:
             print("\n✅ 检测完成 (--detect-only)"); sys.exit(0)
         if depth is None:
@@ -367,7 +396,7 @@ def main():
         if flange_at_capture is None:
             print("❌ 无 flange 位姿, 无法做眼在手上变换"); sys.exit(1)
 
-        # ── [3] 3D 定位: 像素+深度 → 相机系 → 基座系 (手眼变换) ──
+        # ── [3] 抓取3D定位 ──
         print(f"\n[3] 3D 定位 (眼在手上, 时域滤波depth)...")
         depth_val = get_depth_robust(depth, center_uv[0], center_uv[1],
                                      bbox_norm=bbox)
@@ -490,14 +519,53 @@ def main():
                     if _att < 2:
                         time.sleep(1)
 
-            # 6. 等待确认后松爪
-            if not args.yes:
-                input(f"\n  👀 已回观测姿态, 物体夹持中. Enter=松爪: ")
-            _holding = False
-            _ht.join(timeout=1)
-            print(f"  → 放开夹爪")
-            arm.gripper_open(GRIPPER_OPEN)
-            time.sleep(0.8)
+            # 6. 放置 或 松爪
+            if place_pos_base is not None:
+                # 到放置点上方, 不下降直接投放
+                print(f"\n  📍 放置: '{args.place}' 位置=({place_pos_base[0]:.3f}, {place_pos_base[1]:.3f})")
+                cur = arm.get_flange_pose()
+                if cur: print(f"     当前 flange=({cur[0]:.3f}, {cur[1]:.3f}, {cur[2]:.3f})")
+                if not args.yes:
+                    input("  👀 夹持中, Enter=去放置点上方投放: ")
+                place_xy = [place_pos_base[0], place_pos_base[1]]
+                DROP_Z = 0.35
+                placed = False
+                try:
+                    print(f"  → 移动到放置点上方 (z={DROP_Z})")
+                    arm.move_to_pose([place_xy[0], place_xy[1], DROP_Z, *rpy6],
+                                     speed_pct=12, safe_z_first=False, timeout=15.0)
+                    placed = True
+                except Exception as e:
+                    print(f"  ⚠️ 移动失败: {e}, 不松爪")
+                if placed:
+                    # 在放置点上方交互微调
+                    place_xy_final, _ = interactive_fine_tune(
+                        arm, place_xy, DROP_Z, list(rpy6), DROP_Z)
+                    if place_xy_final is None:
+                        print("  放弃放置, 回观测")
+                    else:
+                        input("  👀 对准完成, Enter=松爪: ")
+                    _holding = False
+                    _ht.join(timeout=1)
+                    print(f"  → 松爪 (投放)")
+                    arm.gripper_open(GRIPPER_OPEN)
+                    time.sleep(0.8)
+                print(f"  → 回观测")
+                for _att in range(3):
+                    try:
+                        arm.move_joints(observe, speed_pct=15, timeout=60)
+                        break
+                    except Exception:
+                        if _att < 2: time.sleep(1)
+            else:
+                # 普通模式: 回观测后松爪
+                if not args.yes:
+                    input(f"\n  👀 已回观测姿态, 物体夹持中. Enter=松爪: ")
+                _holding = False
+                _ht.join(timeout=1)
+                print(f"  → 放开夹爪")
+                arm.gripper_open(GRIPPER_OPEN)
+                time.sleep(0.8)
             print("\n✅ 完成: 到上方 → XYZ微调 → 下降 → 夹取 → 回观测 → 松爪")
 
         except Exception as e:
