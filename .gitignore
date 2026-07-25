@@ -1,0 +1,39 @@
+# 图片/视频
+*.jpg
+*.jpeg
+*.png
+*.bmp
+*.mp4
+*.pdf
+*.gv
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+
+# 标定数据 (大/频繁变, 不入库)
+calibration/*.json
+calibration/*.jpg
+calibration/*.png
+calibration/aruco_*.png
+
+# Claude/IDE
+.claude/
+.vscode/
+.idea/
+
+# 日志/临时
+*.log
+Log/
+*.bak
+*.tmp
+
+# IMU 数据
+imu_data/
+
+# 标记模型等大文件
+*. STEP
+*.step
