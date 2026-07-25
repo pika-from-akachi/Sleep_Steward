@@ -72,12 +72,11 @@ def load_mid_pose(fallback):
     return list(fallback)
 
 
-def load_place_pose():
-    """加载示教放置位置, 不存在返回 None"""
+def load_fixed_place():
+    """加载固定放置点, 不存在返回 None"""
     if PLACE_POSE_FILE.exists():
-        fp = json.loads(PLACE_POSE_FILE.read_text())["flange"]
-        print(f"[PlacePose] 固定放置点: x={fp[0]:.3f} y={fp[1]:.3f} z={fp[2]:.3f}")
-        return [fp[0], fp[1], fp[2]]
+        d = json.loads(PLACE_POSE_FILE.read_text())
+        return [d["x"], d["y"], d["z"]]
     return None
 
 
@@ -280,6 +279,19 @@ def interactive_fine_tune(arm, base_xy, above_z, rpy6, grasp_z0):
     return ([base_xy[0] + offset_x, base_xy[1] + offset_y], grasp_z)
 
 
+def _wait_arm(arm, timeout=10.0):
+    """等臂运动完成 (motion_status==0) + 0.3s settling"""
+    for _ in range(int(timeout / 0.15)):
+        try:
+            s = arm._arm.get_arm_status()
+            if s and s.msg.motion_status == 0:
+                time.sleep(0.3)
+                return
+        except Exception:
+            pass
+        time.sleep(0.15)
+
+
 def main():
     parser = argparse.ArgumentParser(description="云端视觉抓取 (眼在手上)")
     parser.add_argument("--object", "-o", required=True)
@@ -289,7 +301,9 @@ def main():
     parser.add_argument("--yes", action="store_true", help="跳过抓取前确认 (熟练后用)")
     parser.add_argument("--enable-depth", action="store_true", help="启用深度 (3D定位)")
     parser.add_argument("--place", "-p", type=str, default=None,
-                        help="放置目标描述 (如 '黄色胶带'), 启用抓取+放置模式")
+                        help="放置目标描述 (如 '黄色胶带'), VLM检测放置点")
+    parser.add_argument("--fixed-place", action="store_true",
+                        help="使用示教的固定放置点 (跳过VLM检测第二个目标)")
     parser.add_argument("--filter-frames", type=int, default=5,
                         help="深度时域滤波帧数 (3-7, 越多噪声越低但延迟越大; 默认5)")
     parser.add_argument("--grasp-rpy", type=str, default=None,
@@ -310,6 +324,7 @@ def main():
     detector = CloudDetector(STEPFUN_API_KEY)
     observe = load_observe_pose()
     mid_pose = load_mid_pose(observe)  # 中间位置, 不存在则用观测姿态
+    print(f"   中间位置关节: {[round(j,2) for j in mid_pose]}")
     cam_mount = cam_mount_xyzrpy()
     print("=" * 60)
     print(f"🎯 {args.object} | 📷 {args.camera} | 深度={'on' if args.enable_depth else 'off'}")
@@ -383,11 +398,9 @@ def main():
         cv2.imwrite("/tmp/grab_detection.jpg", vis)
         print(f"  ✅ {label} | bbox={[round(v,3) for v in bbox]} | center={center_uv}")
 
-        # ── [2b] 放置目标 (固定示教优先) ──
-        place_pos_base = load_place_pose()
-        if place_pos_base is not None:
-            print(f"\n[2b] 放置点: 使用固定示教位置")
-        elif args.place:
+        # ── [2b] 放置目标检测 (可选) ──
+        place_pos_base = None
+        if args.place:
             print(f"\n[2b] 云端 VLM: 放置点 '{args.place}'...")
             p_bbox, p_center, p_label = detector.detect(rgb, args.place)
             if p_bbox is None:
@@ -410,6 +423,15 @@ def main():
                 else:
                     print("  ⚠️ 放置点深度无效, 只抓取不放置")
             cv2.imwrite("/tmp/grab_detection.jpg", vis)
+
+        # ── [2c] 固定放置点 (--fixed-place, 跳过VLM) ──
+        if args.fixed_place:
+            fp = load_fixed_place()
+            if fp is not None:
+                place_pos_base = [fp[0], fp[1], fp[2]]
+                print(f"\n[2c] 固定放置点: {[round(v,3) for v in place_pos_base]}")
+            else:
+                print("\n[2c] ⚠️ 无固定放置点, 请先运行 teach_place.py")
 
         if detect_only:
             print("\n✅ 检测完成 (--detect-only)"); sys.exit(0)
@@ -463,7 +485,6 @@ def main():
 
         # ── [5] 执行抓取 ──
         print(f"\n[5] 执行抓取...")
-        import threading as _th
         try:
             rpy6 = approach_pose[3:]
             grasp_pose_full = list(grasp_pose)
@@ -479,6 +500,7 @@ def main():
                 if fp: print(f"    到达 z={fp[2]:.3f}")
             except Exception as e:
                 print(f"  ❌ 失败: {e}"); sys.exit(1)
+            _wait_arm(arm)
 
             # 2. 在物体上方交互微调 (臂在物体上方, 目视参照)
             if not args.yes:
@@ -516,21 +538,14 @@ def main():
                                     break
                             except Exception:
                                 break
+            _wait_arm(arm)  # 确保下降到位再夹
 
-            # 4. 夹爪闭合 + 持续 hold (防止运动中松开)
+            # 4. 夹爪闭合
             print(f"  🤏 夹取")
             arm.gripper_close()
-            time.sleep(0.5)
-            _holding = True
-            def _hold_gripper():
-                while _holding:
-                    try: arm._gripper.move_gripper_m(0.0)
-                    except: pass
-                    time.sleep(0.3)
-            _ht = _th.Thread(target=_hold_gripper, daemon=True)
-            _ht.start()
+            time.sleep(1.0)
 
-            # 5. 去中间位置 (夹持物体)
+            # 5. 去中间位置 (夹持物体) — 每次停稳后重新夹紧
             print(f"  → 去中间位置 (夹持物体中)")
             for _att in range(3):
                 try:
@@ -540,12 +555,17 @@ def main():
                     print(f"  ⚠️ 去中间位置失败 (尝试 {_att+1}/3): {e}")
                     if _att < 2:
                         time.sleep(1)
+            _wait_arm(arm, timeout=12.0)
+            time.sleep(0.5)
+            arm.gripper_close()  # 到中间位置, 重新夹紧
+            time.sleep(0.5)
+            fp = arm.get_flange_pose()
+            if fp: print(f"    mid_pose flange z={fp[2]:.3f}")
 
             # 6. 放置 或 松爪
             if place_pos_base is not None:
-                # 到放置点上方, 不下降直接投放
-                place_desc = args.place or "固定示教位置"
-                print(f"\n  📍 放置: '{place_desc}' 位置=({place_pos_base[0]:.3f}, {place_pos_base[1]:.3f})")
+                place_label = args.place or "固定放置点"
+                print(f"\n  📍 放置: '{place_label}' 位置=({place_pos_base[0]:.3f}, {place_pos_base[1]:.3f})")
                 cur = arm.get_flange_pose()
                 if cur: print(f"     当前 flange=({cur[0]:.3f}, {cur[1]:.3f}, {cur[2]:.3f})")
                 if not args.yes:
@@ -558,22 +578,25 @@ def main():
                     arm.move_to_pose([place_xy[0], place_xy[1], DROP_Z, *rpy6],
                                      speed_pct=12, safe_z_first=False, timeout=15.0)
                     placed = True
+                    _wait_arm(arm)
+                    time.sleep(0.5)
                 except Exception as e:
                     print(f"  ⚠️ 移动失败: {e}, 不松爪")
                 if placed:
-                    # 在放置点上方交互微调
-                    place_xy_final, _ = interactive_fine_tune(
-                        arm, place_xy, DROP_Z, list(rpy6), DROP_Z)
-                    if place_xy_final is None:
-                        print("  放弃放置, 回观测")
-                    else:
-                        input("  👀 对准完成, Enter=松爪: ")
-                    _holding = False
-                    _ht.join(timeout=1)
+                    if not args.yes:
+                        place_xy_final, _ = interactive_fine_tune(
+                            arm, place_xy, DROP_Z, list(rpy6), DROP_Z)
+                        if place_xy_final is None:
+                            print("  放弃放置, 回观测")
+                        else:
+                            input("  👀 对准完成, Enter=松爪: ")
+                    arm.gripper_close()  # 到放置点, 最后确认夹紧
+                    time.sleep(0.3)
+                    fp = arm.get_flange_pose()
+                    if fp: print(f"    place flange z={fp[2]:.3f}")
                     print(f"  → 松爪 (投放)")
                     arm.gripper_open(GRIPPER_OPEN)
                     time.sleep(0.8)
-                # 松爪后回中间位置
                 print(f"  → 回中间位置")
                 for _att in range(3):
                     try:
@@ -582,11 +605,8 @@ def main():
                     except Exception:
                         if _att < 2: time.sleep(1)
             else:
-                # 普通模式: 已在中间位置
                 if not args.yes:
                     input(f"\n  👀 已到中间位置, 物体夹持中. Enter=松爪: ")
-                _holding = False
-                _ht.join(timeout=1)
                 print(f"  → 放开夹爪")
                 arm.gripper_open(GRIPPER_OPEN)
                 time.sleep(0.8)

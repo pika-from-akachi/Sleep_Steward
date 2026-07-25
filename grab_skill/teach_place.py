@@ -1,13 +1,11 @@
-"""示教放置位置 — 把臂摆到放置点正上方, 记录 flange 位姿。
+"""示教固定放置位置 — 把臂摆到想放东西的地方, Enter保存 flange xyz。
 
 用法:
-    python3 teach_place.py                # 点动摆臂, Enter保存
-    python3 teach_place.py --show         # 查看已保存的放置位置
-    python3 teach_place.py --go           # 去已保存的放置位置 (验证用)
-
-点动: 1+ / 1- / 1++ / 1-- / Enter=保存 / q=退出
+    python3 teach_place.py              # 点动摆臂, Enter保存
+    python3 teach_place.py --go         # 去已保存的位置 (验证)
+    python3 teach_place.py --show       # 查看
 """
-import json, sys, time
+import json, sys, time, re
 from pathlib import Path
 from arm_control import NeroArm
 
@@ -30,9 +28,7 @@ def main():
     if "--show" in sys.argv:
         if PLACE_FILE.exists():
             d = json.loads(PLACE_FILE.read_text())
-            p = d["flange"]
-            print(f"放置点 flange: x={p[0]:.4f} y={p[1]:.4f} z={p[2]:.4f} "
-                  f"r={p[3]:.4f} p={p[4]:.4f} y={p[5]:.4f}")
+            print(f"放置点基座系: x={d['x']:.4f} y={d['y']:.4f} z={d['z']:.4f}")
         else:
             print("尚未保存放置位置")
         return
@@ -45,17 +41,20 @@ def main():
         if not PLACE_FILE.exists():
             print("尚未保存放置位置"); sys.exit(1)
         d = json.loads(PLACE_FILE.read_text())
-        fp = d["flange"]
-        print(f"去放置位置: {[round(v,4) for v in fp]}")
-        arm.move_to_pose(fp, speed_pct=15, safe_z_first=False, timeout=20.0)
-        print("✅ 到达")
+        fp = arm.get_flange_pose()
+        if fp:
+            rpy = list(fp[3:6])
+            print(f"去放置点...")
+            arm.move_to_pose([d["x"], d["y"], d["z"], *rpy],
+                             speed_pct=15, safe_z_first=False, timeout=15.0)
+            print("✅ 到达")
         arm.disconnect()
         return
 
     # ── 点动模式 ──
     arm.enable()
     print("=" * 60)
-    print("  把臂摆到放置点正上方, 然后 Enter=保存")
+    print("  把臂摆到想放东西的位置")
     print("  点动: 1+/-  1++/--  Enter=保存  q=退出")
     show_joints(arm.get_joint_angles())
     fp = arm.get_flange_pose()
@@ -74,17 +73,17 @@ def main():
                 print("⚠️ 无法读取 flange 位姿")
                 continue
             PLACE_FILE.parent.mkdir(parents=True, exist_ok=True)
-            PLACE_FILE.write_text(json.dumps({"flange": fp}, indent=2))
-            print(f"✅ 已保存放置位置: x={fp[0]:.4f} y={fp[1]:.4f} z={fp[2]:.4f}")
+            PLACE_FILE.write_text(json.dumps(
+                {"x": fp[0], "y": fp[1], "z": fp[2]}, indent=2))
+            print(f"✅ 已保存: x={fp[0]:.4f} y={fp[1]:.4f} z={fp[2]:.4f}")
             break
         if cmd.lower() == "q":
             print("退出, 未保存")
             break
 
-        import re
         m = re.match(r'(\d)\s*(\+\+|\-\-|\+|\-)', cmd)
         if not m:
-            print("  格式: 1+ / 2- / 3++ / 4-- / Enter / q")
+            print("  格式: 1+ / 2- / 3++ / Enter / q")
             continue
 
         j = int(m.group(1)) - 1
