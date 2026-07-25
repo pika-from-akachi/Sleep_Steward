@@ -341,6 +341,13 @@ bash launch_orbbec.sh
 
 ---
 
+## 致谢
+
+- [nanobot](https://nanobot.wiki/cn/docs/0.2.2/use-nanobot/providers-and-models) — AI agent 框架，统一编排硬件设备和云端服务
+- [OpenClawPi](https://github.com/vanstrong12138/OpenClawPi) — 松灵机器人 (AgileX Robotics) NERO 机械臂 skills
+
+---
+
 ## License
 
 MIT License. See [LICENSE](LICENSE).
