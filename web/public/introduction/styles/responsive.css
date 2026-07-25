@@ -1,0 +1,260 @@
+@media (max-width: 991px) {
+  :root {
+    --header-height: 4.5rem;
+  }
+
+  .hero {
+    height: 330svh;
+  }
+
+  .site-nav {
+    gap: 1rem;
+  }
+
+  .manifesto__values {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .manifesto__values article:nth-child(2) {
+    border-right: 0;
+  }
+
+  .care-loop__body {
+    gap: 2rem;
+  }
+
+  .care-loop__visual {
+    height: 62svh;
+  }
+
+  .vision__orbit {
+    width: 88vw;
+  }
+}
+
+@media (max-width: 767px) {
+  :root {
+    --page-pad: 1rem;
+  }
+
+  .site-header {
+    min-height: var(--header-height);
+  }
+
+  .menu-toggle {
+    display: flex;
+  }
+
+  .site-nav {
+    position: absolute;
+    top: calc(100% - .4rem);
+    right: 1rem;
+    left: 1rem;
+    display: grid;
+    gap: 0;
+    padding: .5rem 1rem 1rem;
+    background: rgb(4 10 15 / .94);
+    color: white;
+    backdrop-filter: blur(16px);
+    transition: opacity .3s ease, transform .3s var(--ease-out);
+  }
+
+  .menu-toggle[aria-expanded="false"] + .site-nav {
+    opacity: 0;
+    transform: translateY(-.5rem);
+    pointer-events: none;
+  }
+
+  .site-nav a {
+    padding-block: 1rem;
+    border-bottom: 1px solid rgb(255 255 255 / .15);
+  }
+
+  .nav-cta {
+    margin-top: .8rem;
+    border-bottom: 1px solid white !important;
+  }
+
+  .hero {
+    height: 280svh;
+    --room-origin-x-mobile: 50%;
+    --room-origin-y-mobile: 46%;
+  }
+
+  .hero__room {
+    transform-origin: var(--room-origin-x-mobile) var(--room-origin-y-mobile);
+  }
+
+  .hero__copy-item {
+    font-size: clamp(3.25rem, 16vw, 5.5rem);
+  }
+
+  .hero__copy-item--en {
+    font-size: clamp(4rem, 20vw, 7rem);
+  }
+
+  .hero__corner-note {
+    display: none;
+  }
+
+  .hero__scroll-cue {
+    right: 1rem;
+  }
+
+  .manifesto {
+    min-height: auto;
+  }
+
+  .manifesto__layout,
+  .care-loop__intro,
+  .care-loop__body,
+  .vision__heading,
+  .site-footer__top {
+    grid-template-columns: 1fr;
+  }
+
+  .manifesto__index {
+    position: static;
+  }
+
+  .manifesto__statement h2,
+  .manifesto__values,
+  .care-loop__intro h2,
+  .care-loop__lead,
+  .vision__heading h2 {
+    grid-column: 1;
+  }
+
+  .manifesto__statement h2,
+  .care-loop__intro h2,
+  .vision__heading h2 {
+    font-size: clamp(3.2rem, 15vw, 5.4rem);
+  }
+
+  .manifesto__values {
+    grid-template-columns: 1fr;
+    margin-top: 6rem;
+  }
+
+  .manifesto__values article,
+  .manifesto__values article + article {
+    min-height: 14rem;
+    padding: 1.25rem 0;
+    border-right: 0;
+    border-bottom: 1px solid var(--hairline);
+  }
+
+  .manifesto__values p {
+    margin-top: 3.5rem;
+  }
+
+  .manifesto__values p,
+  .care-loop__lead,
+  .loop-step > p:not(.eyebrow),
+  .vision__note,
+  .site-footer__top p {
+    font-size: 1rem;
+    line-height: 1.6;
+  }
+
+  .care-loop__intro {
+    padding-bottom: 2rem;
+  }
+
+  .care-loop__visual {
+    position: sticky;
+    z-index: 0;
+    top: 7rem;
+    height: 42svh;
+    opacity: .17;
+    pointer-events: none;
+  }
+
+  .care-loop__steps {
+    position: relative;
+    z-index: 1;
+    margin-top: -42svh;
+  }
+
+  .loop-step {
+    min-height: 92svh;
+  }
+
+  .vision {
+    min-height: auto;
+  }
+
+  .vision__orbit {
+    display: grid;
+    width: auto;
+    aspect-ratio: auto;
+    gap: .75rem;
+    margin: 5rem 1rem 0;
+    border: 0;
+  }
+
+  .vision__orbit::before,
+  .vision__orbit::after {
+    display: none;
+  }
+
+  .vision__core,
+  .vision__node,
+  .vision__node--1,
+  .vision__node--2,
+  .vision__node--3,
+  .vision__node--4,
+  .vision__node--5 {
+    position: static;
+    width: 100%;
+    min-height: 6rem;
+    aspect-ratio: auto;
+    border-radius: 0;
+    transform: none;
+  }
+
+  .closing h2 {
+    font-size: clamp(4rem, 21vw, 7rem);
+  }
+
+  .site-footer__top > p,
+  .site-footer__top nav {
+    justify-self: start;
+    text-align: left;
+  }
+
+  .site-footer__bottom {
+    display: grid;
+    gap: .8rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important;
+  }
+
+  .hero {
+    height: 180svh;
+  }
+
+  .hero__room,
+  .hero__sky {
+    will-change: auto;
+  }
+
+  [data-reveal],
+  [data-highlight-text] {
+    opacity: 1 !important;
+    transform: none !important;
+    filter: none !important;
+  }
+}

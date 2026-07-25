@@ -1,0 +1,25 @@
+:root {
+  --night: #061a2f;
+  --ink: #040a0f;
+  --amber: #d38a45;
+  --linen: #e7d2b5;
+  --mist: #f1eee7;
+  --sky: #a8c8df;
+  --paper: #f7f3eb;
+  --twilight: #173a60;
+  --midnight: #071a34;
+  --deep-night: #040d1d;
+  --warm-night: #21140f;
+  --moon: #eef5fb;
+  --moon-muted: rgb(238 245 251 / .68);
+  --night-line: rgb(207 228 244 / .18);
+  --display: "Iowan Old Style", "Songti SC", STSong, serif;
+  --body: "Avenir Next", "PingFang SC", "Hiragino Sans GB", sans-serif;
+  --ease-out: cubic-bezier(.22, 1, .36, 1);
+  --ease-in-out: cubic-bezier(.76, 0, .24, 1);
+  --page-pad: clamp(1rem, 3.5vw, 4rem);
+  --section-gap: clamp(5rem, 11vw, 11rem);
+  --hairline: color-mix(in srgb, currentColor 22%, transparent);
+  --header-height: 5.25rem;
+  --z-header: 100;
+}

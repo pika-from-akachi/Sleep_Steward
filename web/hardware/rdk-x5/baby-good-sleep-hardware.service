@@ -1,0 +1,16 @@
+[Unit]
+Description=Baby Good Sleep RDK X5 hardware agent
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /opt/baby-good-sleep/hardware_agent.py --host 0.0.0.0 --port 8765
+KillSignal=SIGINT
+TimeoutStopSec=5
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

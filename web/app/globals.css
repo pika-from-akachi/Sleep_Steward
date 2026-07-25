@@ -1,0 +1,306 @@
+@import "tailwindcss";
+
+:root {
+  /* 月息 · 暖夜配色 */
+  --night-0: #0a0c1e;
+  --night-1: #131539;
+  --night-2: #241f4b;
+  --cream: #f3ead8;      /* 月下暖白 */
+  --cream-dim: #b9ad95;  /* 暖灰 */
+  --moon: #f5dfae;       /* 月色,全站唯一暖亮色 */
+  --hair: rgba(243, 234, 216, 0.16);
+  --panel: rgba(16, 16, 40, 0.38);
+}
+
+@theme inline {
+  --color-night-0: var(--night-0);
+  --color-night-1: var(--night-1);
+  --color-night-2: var(--night-2);
+  --color-cream: var(--cream);
+  --color-cream-dim: var(--cream-dim);
+  --color-moon: var(--moon);
+  --color-hair: var(--hair);
+}
+
+body {
+  color: var(--cream);
+  font-family: "PingFang SC", "Microsoft YaHei", -apple-system, system-ui, sans-serif;
+  min-height: 100vh;
+  /* 星空照片由 NightSky 组件的固定图层承载(Safari 对 background-attachment:fixed + cover 渲染有缺陷);此处渐变仅作图片加载前的回退 */
+  background: linear-gradient(180deg, var(--night-0) 0%, var(--night-1) 55%, var(--night-2) 100%);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 宋体承题:标题与关键数字 */
+.serif {
+  font-family: "Songti SC", "Noto Serif SC", "STSong", serif;
+}
+
+/* 三圆环境仪表:左右指标可点击换入主位,指针移动提供轻量空间反馈 */
+.env-orbit-wrap {
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  align-items: center;
+}
+
+.env-orbit-stage {
+  --orbit-main-size: 300px;
+  --orbit-side-size: 148px;
+  --orbit-side-drop: 82px;
+  --orbit-main-tilt-x: 0deg;
+  --orbit-main-tilt-y: 0deg;
+  --orbit-side-tilt-x: 0deg;
+  --orbit-side-tilt-y: 0deg;
+  position: relative;
+  width: min(100%, 640px);
+  min-height: 340px;
+  perspective: 900px;
+  isolation: isolate;
+}
+
+.env-orbit-position {
+  position: absolute;
+  transform: translateX(-50%);
+}
+
+.env-orbit-button {
+  position: relative;
+  display: block;
+  width: var(--orbit-side-size);
+  height: var(--orbit-side-size);
+  border-radius: 50%;
+  color: var(--cream);
+  cursor: pointer;
+  transform-style: preserve-3d;
+  transition: width 700ms cubic-bezier(0.22, 1, 0.36, 1), height 700ms cubic-bezier(0.22, 1, 0.36, 1), filter 240ms ease;
+}
+
+.env-orbit-button.is-center {
+  width: var(--orbit-main-size);
+  height: var(--orbit-main-size);
+  transform: rotateX(var(--orbit-main-tilt-x)) rotateY(var(--orbit-main-tilt-y));
+}
+
+.env-orbit-button.is-side {
+  transform: rotateX(var(--orbit-side-tilt-x)) rotateY(var(--orbit-side-tilt-y));
+  filter: saturate(0.82);
+}
+
+.env-orbit-button.is-side:hover,
+.env-orbit-button.is-side:focus-visible {
+  filter: saturate(1) brightness(1.08);
+}
+
+.env-orbit-button:focus-visible {
+  outline: 1px solid var(--orbit-accent);
+  outline-offset: 6px;
+}
+
+.env-orbit-glow {
+  position: absolute;
+  inset: 5%;
+  border-radius: 50%;
+  background: radial-gradient(circle, var(--orbit-glow) 0%, transparent 69%);
+  filter: blur(27px);
+  opacity: 0.7;
+  transform: translateZ(-24px) scale(1.12);
+  transition: opacity 400ms ease;
+}
+
+.env-orbit-button.is-side .env-orbit-glow {
+  opacity: 0.38;
+}
+
+.env-orbit-surface {
+  position: absolute;
+  inset: 7%;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 32% 24%, rgba(255, 255, 255, 0.13), transparent 25%),
+    radial-gradient(circle at 70% 78%, var(--orbit-shadow), transparent 46%),
+    rgba(7, 10, 24, 0.95);
+  box-shadow:
+    inset 0 2px 22px rgba(0, 0, 0, 0.62),
+    inset -10px -16px 28px var(--orbit-shadow),
+    0 18px 42px rgba(0, 0, 0, 0.28);
+  transform: translateZ(12px);
+}
+
+.env-orbit-surface::after {
+  position: absolute;
+  top: 9%;
+  left: 21%;
+  width: 42%;
+  height: 18%;
+  border-radius: 50%;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.12), transparent);
+  content: "";
+  filter: blur(7px);
+  transform: rotate(-16deg);
+}
+
+.env-orbit-ring {
+  position: absolute;
+  inset: 4%;
+  width: 92%;
+  height: 92%;
+  transform: rotate(-90deg);
+}
+
+.env-orbit-ring circle:last-child {
+  transition: stroke-dasharray 700ms ease;
+  filter: drop-shadow(0 0 3px var(--orbit-accent));
+}
+
+.env-orbit-content {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  transform: translateZ(24px);
+}
+
+.env-orbit-number {
+  display: block;
+  font-size: 27px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.env-orbit-button.is-center .env-orbit-number {
+  font-size: 50px;
+}
+
+.env-orbit-unit {
+  margin-left: 4px;
+  color: var(--cream-dim);
+  font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 9px;
+}
+
+.env-orbit-button.is-center .env-orbit-unit {
+  margin-left: 6px;
+  font-size: 15px;
+}
+
+.env-orbit-label {
+  margin-top: 8px;
+  color: var(--cream-dim);
+  font-size: 9px;
+  letter-spacing: 0;
+}
+
+.env-orbit-button.is-center .env-orbit-label {
+  margin-top: 12px;
+  font-size: 11px;
+}
+
+.env-orbit-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: -4px;
+  padding: 4px;
+  border-radius: 999px;
+}
+
+.env-orbit-tabs button {
+  min-width: 76px;
+  border-radius: 999px;
+  padding: 8px 15px;
+  color: var(--cream-dim);
+  font-size: 12.5px;
+  letter-spacing: 0;
+  transition: color 200ms ease, background 200ms ease;
+}
+
+.env-orbit-tabs button.is-active {
+  color: var(--cream);
+  background: rgba(255, 255, 255, 0.09);
+}
+
+@media (max-width: 520px) {
+  .env-orbit-stage {
+    --orbit-main-size: 236px;
+    --orbit-side-size: 92px;
+    --orbit-side-drop: 76px;
+    min-height: 270px;
+  }
+
+  .env-orbit-position.is-left {
+    left: 13% !important;
+  }
+
+  .env-orbit-position.is-right {
+    left: 87% !important;
+  }
+
+  .env-orbit-number {
+    font-size: 19px;
+  }
+
+  .env-orbit-button.is-center .env-orbit-number {
+    font-size: 42px;
+  }
+
+  .env-orbit-button.is-side .env-orbit-unit {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .env-orbit-button,
+  .env-orbit-ring circle:last-child {
+    transition: none !important;
+  }
+}
+
+/* 磨砂夜色面板 */
+.glass {
+  background: var(--panel);
+  backdrop-filter: blur(10px);
+  border: 1px solid var(--hair);
+}
+
+/* 月色主按钮 */
+.btn-moon {
+  color: #241c0e;
+  background: linear-gradient(180deg, #f8e8c0, #eed9a4);
+  box-shadow: 0 6px 30px rgba(238, 217, 164, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.5);
+  transition: transform 0.2s;
+}
+.btn-moon:hover {
+  transform: translateY(-1px);
+}
+
+/* 弦月记号(logo) */
+.moon-mark {
+  position: relative;
+  width: 20px;
+  height: 20px;
+  display: inline-block;
+  flex: none;
+}
+.moon-mark::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: var(--moon);
+  box-shadow: 0 0 10px rgba(245, 223, 174, 0.7);
+}
+.moon-mark::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: var(--night-1);
+  transform: translateX(-30%) scale(0.9);
+}

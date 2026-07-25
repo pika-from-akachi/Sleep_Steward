@@ -1,0 +1,70 @@
+// 宝宝爱睡觉 — data model (see docs/superpowers/specs)
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(cuid())
+  nickname  String
+  userType  String // "adult" | "child"
+  childAge  Int?
+  createdAt DateTime @default(now())
+  prefs     PreferenceProfile[]
+  sessions  SleepSession[]
+  commands  VoiceCommand[]
+}
+
+model PreferenceProfile {
+  id              String   @id @default(cuid())
+  userId          String
+  name            String
+  tempMin         Float
+  tempMax         Float
+  humidityMin     Float
+  humidityMax     Float
+  lightBrightness Int // 0-100
+  lightColorTemp  String // "warm" | "cool"
+  isDefault       Boolean  @default(false)
+  createdAt       DateTime @default(now())
+  user            User     @relation(fields: [userId], references: [id])
+  sessions        SleepSession[]
+}
+
+model SleepSession {
+  id          String       @id @default(cuid())
+  userId      String
+  profileId   String
+  startedAt   DateTime     @default(now())
+  endedAt     DateTime?
+  status      String // "active" | "ended"
+  summaryJson String?
+  user        User         @relation(fields: [userId], references: [id])
+  profile     PreferenceProfile @relation(fields: [profileId], references: [id])
+  logs        SessionLog[]
+}
+
+model SessionLog {
+  id          String       @id @default(cuid())
+  sessionId   String
+  timestamp   DateTime     @default(now())
+  type        String // env_reading | device_trigger | command | voice | error
+  payloadJson String
+  session     SleepSession @relation(fields: [sessionId], references: [id])
+}
+
+model VoiceCommand {
+  id            String   @id @default(cuid())
+  userId        String
+  sessionId     String?
+  rawText       String
+  mode          String // "hardcoded" | "natural"
+  parsedJson    String
+  matchedDevice String?
+  createdAt     DateTime @default(now())
+  user          User     @relation(fields: [userId], references: [id])
+}
