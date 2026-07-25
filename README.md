@@ -2,8 +2,8 @@
 
 # 🛏️ Sleep Steward（睡眠管家）
 
-**NERO 机械臂视觉抓取 + 智能戒指手势 + Tracer 移动底盘 + nanobot AI 智能体**  
-*Eye-in-hand Visual Grasping · Smart Ring Gesture · Mobile Base · AI Agent Orchestration*
+**NERO 机械臂视觉抓取 + Tracer 移动底盘 + nanobot AI 智能体**  
+*Eye-in-hand Visual Grasping · Mobile Base · AI Agent Orchestration*
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![ROS2](https://img.shields.io/badge/ROS2-Humble-22314E?logo=ros)](https://docs.ros.org/en/humble/)
@@ -19,7 +19,6 @@
 **Sleep Steward** 是一个运行在 RDK X5 上的机器人综合系统，核心能力：
 
 - 🤖 **视觉抓取**：云端 VLM 检测物体 → 深度 3D 定位 → 机械臂抓取+放置
-- 💍 **戒指手势**：智能戒指 BLE 通信，录音/IMU/手势识别
 - 🚗 **底盘移动**：Tracer 差速底盘 CAN 直控
 - 🧠 **nanobot 智能体**：AI agent 统一编排硬件设备和云端服务
 
@@ -30,12 +29,12 @@
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                       RDK X5                            │
-│   ┌──────────┐  ┌──────────┐  ┌──────────────────┐    │
-│   │ nanobot  │  │ ROS2     │  │ BLE (ring_sound) │    │
-│   │ AI Agent │  │ Humble   │  │ 智能戒指通信       │    │
-│   └────┬─────┘  └────┬─────┘  └────────┬─────────┘    │
-│        │             │                 │               │
-│   ┌────┴─────────────┴─────────────────┴──────────┐    │
+│   ┌──────────┐  ┌──────────┐                       │
+│   │ nanobot  │  │ ROS2     │                       │
+│   │ AI Agent │  │ Humble   │                       │
+│   └────┬─────┘  └────┬─────┘                       │
+│        │             │                              │
+│   ┌────┴─────────────┴─────────────────────────┐    │
 │   │              CAN bus / USB                      │    │
 │   │  ┌──────────┐  ┌──────────┐  ┌─────────────┐  │    │
 │   │  │ NERO 臂  │  │ Tracer   │  │ Orbbec DC1  │  │    │
@@ -57,7 +56,6 @@
 | **NERO 机械臂** | CAN1 @ 1Mbps | 7-DOF 抓取 |
 | **Orbbec DaBai DC1** | USB 2.0 | 眼在手上 RGB-D |
 | **Tracer 1.0** | CAN @ 500kbps | 移动底盘 |
-| **智能戒指** | BLE | 手势/录音/IMU |
 | **StepFun API** | HTTPS | 云端 VLM 目标检测 |
 
 ---
@@ -83,13 +81,7 @@ ring_sound_SDK/
 │   ├── blanket_guardian.py    #   主控制程序
 │   ├── vlm_detector.py        #   VLM 踢被子检测
 │   └── teach_and_test.py      #   位姿示教工具
-├── ring_sound_SDK/            # 💍 智能戒指 Python SDK
-│   ├── ring_sound.py          #   BLE 通信 + Speex 解码
-│   ├── ring_sound_use.md      #   SDK 使用手册
-│   ├── protocol.md            #   v4 协议文档
-│   └── README.md              #   技术说明
 ├── safe_arm_skill/            # 🛡️ 机械臂安全验证
-├── imu_reader.py              #   戒指 IMU 数据读取
 ├── tracer_test.py             #   底盘运动测试
 ├── tracer_keyboard.py         #   底盘键盘遥控
 ├── nanobot_config.json        #   nanobot AI 配置
@@ -107,7 +99,7 @@ ring_sound_SDK/
 **nanobot** 是运行在 RDK X5 上的 AI agent 框架，作为整个系统的"大脑"：
 
 - 接收自然语言指令 → 拆解为具体操作 → 调用硬件/云端资源 → 反馈结果
-- 统一管理 NERO 臂、相机、底盘、戒指、VLM API 等所有资源
+- 统一管理 NERO 臂、相机、底盘、VLM API 等所有资源
 - 通过 `skills/` 目录下的技能文件扩展能力
 
 ### nanobot 在全流程中的角色
@@ -277,46 +269,6 @@ Flange 目标 [x, y, z, r, p, y]  ← 固件 IK 解算为关节角
 | `transforms.py` | 眼在手上变换 (CAM_MOUNT 标定结果, RPY 矩阵) |
 | `teach_mid.py` | 中间位置示教 (使能状态关节点动, Enter保存) |
 | `calib_full.py` | 全关节手眼标定 (40姿态, Tsai初值+非线性优化) |
-
----
-
-## 💍 智能戒指
-
-`ring_sound_SDK/ring_sound.py` — 通过 BLE 连接智能戒指：
-
-```python
-import asyncio
-import ring_sound as sdk
-
-async def main():
-    ring = await sdk.find_ring("XX:XX:XX:XX:XX:XX")  # MAC 地址
-    info = await sdk.get_system_info(ring)
-    print(f"固件: {info.firmware_version}")
-
-    # 录音下载 + Speex → WAV 解码
-    file_index, raw = await sdk.receive_auto_audio_file(ring, timeout_s=60)
-    bundle = sdk.save_audio_bundle(file_index, raw, output_dir="audio")
-
-    # 实时 IMU (加速度+陀螺仪)
-    await sdk.start_sensor_report(ring)
-    batch = await sdk.wait_sensor_data(ring, timeout_s=10)
-
-    # 手势识别
-    event = await sdk.wait_gesture(ring)
-    print(sdk.sensor_gesture_name(event.gesture_id))
-
-asyncio.run(main())
-```
-
-| 能力 | 说明 |
-|---|---|
-| 系统信息 | 固件版本、电量、存储 |
-| 录音下载 | Speex 编码 → SDK 解码为 WAV (16kHz mono) |
-| 实时 IMU | 加速度计 + 陀螺仪, 批量上报 |
-| 手势识别 | 双击/长按, rotate/wave/idle |
-| 模式切换 | 录音模式 ↔ 手势模式 (单击切换) |
-
----
 
 ## 🚗 底盘控制
 
