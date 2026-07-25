@@ -42,6 +42,8 @@ GRASP_DESCEND = 0.10      # approach → grasp 下抓行程 (m, 夹爪尖端从�
 # 斜抓几何补偿 [dx, dy, dz] (实测微调得到, 下次自动对准, 不用手动微调)
 GRASP_OFFSET = [-0.06, 0.01, -0.06]
 PLACE_OFFSET = [-0.05, -0.03, 0.0]   # 放置点偏置
+DROP_Z = 0.35  # 投放高度
+WATCH_THRESHOLD = 0.30  # 巡检触发距离 (m)
 GRASP_SPEED = 15
 GRIPPER_OPEN = 0.07
 # 抓取朝向 [roll,pitch,yaw] (基座系, +Y前+Z上)
@@ -304,6 +306,10 @@ def main():
                         help="放置目标描述 (如 '黄色胶带'), VLM检测放置点")
     parser.add_argument("--fixed-place", action="store_true",
                         help="使用示教的固定放置点 (跳过VLM检测第二个目标)")
+    parser.add_argument("--watch", action="store_true",
+                        help="巡检模式: 循环检测, 物体偏离>30cm自动抓回")
+    parser.add_argument("--max-cycles", type=int, default=0,
+                        help="巡检最大次数 (0=无限)")
     parser.add_argument("--filter-frames", type=int, default=5,
                         help="深度时域滤波帧数 (3-7, 越多噪声越低但延迟越大; 默认5)")
     parser.add_argument("--grasp-rpy", type=str, default=None,
@@ -503,11 +509,14 @@ def main():
             _wait_arm(arm)
 
             # 2. 在物体上方交互微调 (臂在物体上方, 目视参照)
+            grasp_dx, grasp_dy = 0.0, 0.0
             if not args.yes:
                 xy_final, new_grasp_z = interactive_fine_tune(
                     arm, grasp_pose_full[:2], above_z, list(rpy6), grasp_pose_full[2])
                 if xy_final is None:
                     print("放弃"); sys.exit(0)
+                grasp_dx = xy_final[0] - grasp_pose_full[0]
+                grasp_dy = xy_final[1] - grasp_pose_full[1]
                 grasp_pose_full[0], grasp_pose_full[1] = xy_final[0], xy_final[1]
                 grasp_pose_full[2] = new_grasp_z
 
@@ -518,7 +527,8 @@ def main():
                                  safe_z_first=False, timeout=15.0)
             except Exception as e:
                 print(f"  ❌ 下降失败: {e}"); sys.exit(1)
-            time.sleep(0.5)  # 等臂停稳
+            _wait_arm(arm)
+            time.sleep(1.5)  # 远距离运动需要更长沉降
             fp = arm.get_flange_pose()
             if fp:
                 print(f"    当前 z={fp[2]:.3f}")
@@ -571,7 +581,6 @@ def main():
                 if not args.yes:
                     input("  👀 夹持中, Enter=去放置点上方投放: ")
                 place_xy = [place_pos_base[0], place_pos_base[1]]
-                DROP_Z = 0.35
                 placed = False
                 try:
                     print(f"  → 移动到放置点上方 (z={DROP_Z})")
@@ -610,7 +619,100 @@ def main():
                 print(f"  → 放开夹爪")
                 arm.gripper_open(GRIPPER_OPEN)
                 time.sleep(0.8)
-            print("\n✅ 完成: 到上方 → XYZ微调 → 下降 → 夹取 → 回观测 → 松爪")
+            print("\n✅ 完成: 到上方 → XYZ微调 → 下降 → 夹取 → 中间位置 → 放置 → 松爪")
+
+            # ── 巡检循环 ──
+            if args.watch and place_pos_base is not None:
+                place_ref = list(place_pos_base)
+                print(f"\n🔁 巡检 | 参考={[round(v,3) for v in place_ref]} "
+                      f"阈值={WATCH_THRESHOLD}m "
+                      f"{'无限' if args.max_cycles==0 else f'最多{args.max_cycles}次'}")
+                n = 0
+                try:
+                    while args.max_cycles == 0 or n < args.max_cycles:
+                        n += 1
+                        print(f"\n{'─'*40} 巡检 #{n} {'─'*40}")
+                        time.sleep(2)
+                        try: arm.move_joints(observe, speed_pct=15, timeout=60)
+                        except: pass
+                        _wait_arm(arm, timeout=12.0)
+
+                        with StereoCamera(camera_model=args.camera,
+                                          enable_depth=args.enable_depth) as cam2:
+                            time.sleep(1.0)
+                            if args.enable_depth:
+                                rgb2, depth2, K2 = cam2.capture_filtered(num_frames=3, timeout=6.0)
+                            else:
+                                rgb2, depth2, K2 = cam2.capture(timeout=4.0)
+
+                        if rgb2 is None or depth2 is None:
+                            print("  ⚠️ 采图失败"); continue
+                        bbox2, center_uv2, _ = detector.detect(rgb2, args.object)
+                        if bbox2 is None:
+                            print("  ⚠️ 未找到"); continue
+                        d2 = get_depth_robust(depth2, center_uv2[0], center_uv2[1], bbox_norm=bbox2)
+                        if d2 <= 0:
+                            print("  ⚠️ 深度无效"); continue
+                        fp2 = arm.get_flange_pose()
+                        if fp2 is None: continue
+                        p2 = eye_in_hand_to_base(
+                            pixel_to_camera_3d(center_uv2[0], center_uv2[1], d2, K2),
+                            fp2, cam_mount)
+                        dist = np.linalg.norm(np.array(p2[:2]) - np.array(place_ref[:2]))
+                        print(f"  物体=({p2[0]:.3f},{p2[1]:.3f}) "
+                              f"参考=({place_ref[0]:.3f},{place_ref[1]:.3f}) d={dist:.3f}m")
+
+                        if dist > WATCH_THRESHOLD:
+                            print("  🚨 抓回...")
+                            try:
+                                _, gp = compute_grasp_pose(p2, grasp_rpy)
+                                gfull = [gp[0]+grasp_dx, gp[1]+grasp_dy, gp[2], *rpy6]
+                                # 到上方
+                                az = gfull[2] + 0.10
+                                arm.move_to_pose([gfull[0], gfull[1], az, *rpy6],
+                                                 speed_pct=GRASP_SPEED, safe_z_first=False, timeout=15.0)
+                                _wait_arm(arm)
+                                # Z下降 — 与单次完全一致
+                                arm.move_to_pose(gfull, speed_pct=10, safe_z_first=False, timeout=15.0)
+                                _wait_arm(arm)
+                                time.sleep(1.5)  # 远距离运动需要更长沉降
+                                fp3 = arm.get_flange_pose()
+                                if fp3 and fp3[2] > az - 0.01:
+                                    jj = arm.get_joint_angles()
+                                    if jj:
+                                        for _ in range(15):
+                                            jj[1] += 0.03; jj[1] = min(jj[1], 2.5)
+                                            try: arm.move_joints(jj, speed_pct=8, timeout=4.0)
+                                            except: break
+                                    _wait_arm(arm)
+                                    time.sleep(0.5)
+                                # 夹
+                                arm.gripper_close(); time.sleep(1.0)
+                                # 去中间位置 + 重新夹紧
+                                for _a in range(3):
+                                    try: arm.move_joints(mid_pose, speed_pct=20, timeout=60); break
+                                    except: time.sleep(1)
+                                _wait_arm(arm, timeout=12.0); time.sleep(0.5)
+                                arm.gripper_close(); time.sleep(0.5)
+                                # 去放置点
+                                arm.move_to_pose([place_ref[0], place_ref[1], DROP_Z, *rpy6],
+                                                 speed_pct=12, safe_z_first=False, timeout=15.0)
+                                _wait_arm(arm); time.sleep(0.5)
+                                arm.gripper_close(); time.sleep(0.3)
+                                # 松爪
+                                arm.gripper_open(GRIPPER_OPEN); time.sleep(0.8)
+                                # 回中间位置
+                                for _a in range(3):
+                                    try: arm.move_joints(mid_pose, speed_pct=20, timeout=60); break
+                                    except: time.sleep(1)
+                                print(f"  ✅ 抓回完成")
+                            except Exception as e2:
+                                print(f"  ❌ 抓取失败: {e2}")
+                        else:
+                            print("  ✅ 在范围内")
+                        time.sleep(2)
+                except KeyboardInterrupt:
+                    print(f"\n⏹️  巡检停止 ({n}次)")
 
         except Exception as e:
             print(f"\n❌ 失败: {e}")
