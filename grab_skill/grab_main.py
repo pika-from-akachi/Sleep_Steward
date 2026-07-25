@@ -34,6 +34,7 @@ STEPFUN_API_KEY = "42bzP32Fu4tI7lQlQPUU22jdfYiPvr2qSVVP7Mzmmfa5yjLfD4rwFjgrW5ST2
 # 观测姿态 (相机俯视桌面, 能看到物体) — 用标定基准姿态
 OBSERVE_FILE = Path("/root/grab_skill/calibration/base_pose.json")
 MID_POSE_FILE = Path("/root/grab_skill/calibration/mid_pose.json")
+PLACE_POSE_FILE = Path("/root/grab_skill/calibration/place_pose.json")
 DEFAULT_OBSERVE = [1.51, -0.20, -2.757, 1.67, 2.757, 0.363, -0.773]
 
 GRIPPER_TOOL_LEN = 0.13   # 夹爪尖端在 flange 下方的垂直距离 (斜抓投影; 0.12偏低0.14偏高, 取0.13)
@@ -69,6 +70,15 @@ def load_mid_pose(fallback):
         return list(json.loads(MID_POSE_FILE.read_text())["joints"])
     print("[MidPose] ⚠️ 无 mid_pose.json, 用回退姿态")
     return list(fallback)
+
+
+def load_place_pose():
+    """加载示教放置位置, 不存在返回 None"""
+    if PLACE_POSE_FILE.exists():
+        fp = json.loads(PLACE_POSE_FILE.read_text())["flange"]
+        print(f"[PlacePose] 固定放置点: x={fp[0]:.3f} y={fp[1]:.3f} z={fp[2]:.3f}")
+        return [fp[0], fp[1], fp[2]]
+    return None
 
 
 def pixel_to_camera_3d(u, v, depth_m, K):
@@ -373,9 +383,11 @@ def main():
         cv2.imwrite("/tmp/grab_detection.jpg", vis)
         print(f"  ✅ {label} | bbox={[round(v,3) for v in bbox]} | center={center_uv}")
 
-        # ── [2b] 放置目标检测 (可选) ──
-        place_pos_base = None
-        if args.place:
+        # ── [2b] 放置目标 (固定示教优先) ──
+        place_pos_base = load_place_pose()
+        if place_pos_base is not None:
+            print(f"\n[2b] 放置点: 使用固定示教位置")
+        elif args.place:
             print(f"\n[2b] 云端 VLM: 放置点 '{args.place}'...")
             p_bbox, p_center, p_label = detector.detect(rgb, args.place)
             if p_bbox is None:
@@ -532,7 +544,8 @@ def main():
             # 6. 放置 或 松爪
             if place_pos_base is not None:
                 # 到放置点上方, 不下降直接投放
-                print(f"\n  📍 放置: '{args.place}' 位置=({place_pos_base[0]:.3f}, {place_pos_base[1]:.3f})")
+                place_desc = args.place or "固定示教位置"
+                print(f"\n  📍 放置: '{place_desc}' 位置=({place_pos_base[0]:.3f}, {place_pos_base[1]:.3f})")
                 cur = arm.get_flange_pose()
                 if cur: print(f"     当前 flange=({cur[0]:.3f}, {cur[1]:.3f}, {cur[2]:.3f})")
                 if not args.yes:
